@@ -1,0 +1,35 @@
+# OPTIONAL PAID ALTERNATIVE: NOT APPROVED. The selected demo path is the local
+# Mac backend plus a free tunnel; see docs/DEPLOYMENT.md. Do not apply this
+# manifest unless the user later explicitly approves paid resources.
+# One instance owns SQLite and the scheduled worker. Never add a separate
+# disk-backed worker service expecting to share this disk.
+# Required server integration is listed in docs/DEPLOYMENT.md.
+services:
+  - type: web
+    name: proletariat-api
+    runtime: node
+    plan: 0.5c-512mb
+    numInstances: 1
+    region: oregon
+    autoDeployTrigger: "off"
+    buildCommand: npm ci --include=dev
+    startCommand: npm start
+    healthCheckPath: /api/health
+    disk:
+      name: proletariat-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: "3001"
+      - key: DATA_DIR
+        value: /var/data
+      # CORS_ORIGIN, frontend return URL, session settings and provider keys
+      # must be reconciled with the lead's server/.env.example before launch.
+      # Add secret values only through the host's environment settings.

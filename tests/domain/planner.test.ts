@@ -3,6 +3,12 @@ import { generatePlan } from "../../src/lib/domain/planner";
 import { task, workspace } from "./helpers";
 
 describe("feasible deterministic planning", () => {
+  it("does not schedule new work in the past when a planning clock is supplied", () => {
+    const state = workspace(); state.tasks = [task("one")];
+    expect(generatePlan(state, state.today, { now: new Date("2026-10-03T14:00:30Z") }).blocks[0].start).toBe("2026-10-03T14:01:00.000Z");
+    const afterHours = generatePlan(state, state.today, { now: new Date("2026-10-03T18:00:00Z") });
+    expect(afterHours.blocks).toHaveLength(0); expect(afterHours.remainingMinutes).toEqual({ one: 30 });
+  });
   it("respects timezone, overlapping meetings and both calendar buffers", () => {
     const state = workspace(); state.settings.timezone = "America/New_York"; state.settings.workingHoursEnd = "12:00";
     state.tasks = [task("one", { estimateMinutes: 60 }), task("two", { estimateMinutes: 30 })];

@@ -14,19 +14,19 @@ export function createDemoState(now = new Date()): WorkspaceState {
     resourceIds: [], workflowIds: [], messages: [{ id: `${id}-welcome`, role: "assistant", content: `${summary} This is a synthetic demo; no external accounts have been read.`, createdAt: timestamp }],
   });
   const task = (id: string, title: string, estimateMinutes: number, fields: Partial<Task> = {}): Task => ({
-    id, title, status: "open", priority: "P1", plannedDate: today, estimateMinutes, notes: "Fictional demo task.", sourceIds: [], carryoverCount: 0, ...fields,
+    id, title, status: "open", priority: "P1", plannedDate: today, estimateMinutes, notes: "Fictional demo task.", sourceIds: [], carryoverCount: 0, updatedAt: timestamp, ...fields,
   });
   const state: WorkspaceState = {
     version: 1, today,
     settings: { timezone: "UTC", workingHoursStart: "09:00", workingHoursEnd: "17:00", rolloverEnabled: true, mode: "demo" },
-    permissions: { gmailRead: true, gmailFull: false, driveRead: true, driveFull: false, calendarWrite: false, docsWrite: false, draft: true, send: false, bulkSend: false },
+    permissions: { gmailRead: true, gmailFull: false, driveRead: true, driveFull: false, driveWrite: false, calendarWrite: false, docsWrite: false, draft: true, send: false, bulkSend: false },
     tasks: [
       task(stableId("task", "demo-project-notes", "line-0"), "Review the project outline", 45, { priority: "P0", dueDate: today, dueTime: "12:00", agentId: "agent-work", sourceIds: ["demo-project-notes"] }),
       task(stableId("task", "demo-session-notes", "line-0"), "Prepare for the design session", 30, { dueDate: today, agentId: "agent-learning", sourceIds: ["demo-session-notes"] }),
       task(stableId("task", "demo-session-notes", "line-1"), "Write up the research session", 45, { dueDate: tomorrow, agentId: "agent-learning", sourceIds: ["demo-session-notes"] }),
       task(stableId("task", "demo-project-notes", "line-1"), "Finish the launch checklist", 60, { plannedDate: yesterday, dueDate: yesterday, carryoverCount: 1, agentId: "agent-work", splittable: true, sourceIds: ["demo-project-notes"] }),
       task("task-demo-inbox", "Review the weekly newsletter draft", 20, { agentId: "agent-comms", priority: "P2" }),
-      task("task-demo-waiting", "Follow up on the room booking", 15, { status: "waiting", nextActionDate: tomorrow, agentId: "agent-personal" }),
+      task("task-demo-waiting", "Follow up on the room booking", 15, { status: "waiting", nextActionDate: tomorrow, needsInput: "Confirm the preferred room and attendee count.", agentId: "agent-personal" }),
       task("task-demo-finished", "Collect reference documents", 20, { status: "done", completedAt: timestamp, agentId: "agent-work" }),
     ],
     events: [{ id: "event-demo-checkin", title: "Project check-in", start: `${today}T10:30:00.000Z`, end: `${today}T11:00:00.000Z`, calendarId: "demo-primary", status: "confirmed", sourceIds: [] },
@@ -45,8 +45,9 @@ export function createDemoState(now = new Date()): WorkspaceState {
       agent("agent-personal", "Personal", "Keep track of the small things.", "#5e91c4", "P", "The room booking is waiting until tomorrow.")],
     workflows: [{ id: "workflow-demo-morning", name: "Morning plan", intent: "Roll over unfinished tasks and plan my day", agentId: "agent-work", enabled: true, version: 1, mode: "automatic", trigger: "daily", query: "", actions: ["rollover", "plan"], resourceIds: [], schedule: "08:00", timezone: "UTC" }],
     drafts: [{ id: "draft-demo-newsletter", to: "alex@example.com", subject: "Example project update", body: "Hi Alex,\n\nHere is the fictional weekly project update.\n\nThanks!", status: "draft", mode: "demo", updatedAt: timestamp }],
-    campaigns: [],
-    runs: [{ id: "run-demo-plan", title: "Demo plan prepared", description: "Synthetic tasks were placed around example calendar events with ten-minute buffers.", status: "succeeded", createdAt: timestamp, agentId: "agent-work", mode: "demo", modelCalls: 0, tokens: 0, apiCalls: 0, writes: 0, cacheHits: 0, sourceIds: [] }],
+    campaigns: [], recipes: [],
+    runs: [{ id: "run-demo-source", title: "Synthetic task prepared", description: "The fictional project outline task is linked to its example source. No model or external API was called.", status: "succeeded", createdAt: timestamp, taskId: stableId("task", "demo-project-notes", "line-0"), agentId: "agent-work", mode: "demo", modelCalls: 0, tokens: 0, apiCalls: 0, writes: 0, cacheHits: 0, sourceIds: ["demo-project-notes"] },
+      { id: "run-demo-plan", title: "Demo plan prepared", description: "Synthetic tasks were placed around example calendar events with ten-minute buffers.", status: "succeeded", createdAt: timestamp, agentId: "agent-work", mode: "demo", modelCalls: 0, tokens: 0, apiCalls: 0, writes: 0, cacheHits: 0, sourceIds: [] }],
     scans: [],
     connections: [{ provider: "google", connected: false, configured: false, label: "Google is not connected" }, { provider: "model", connected: false, configured: false, label: "Deterministic demo — no model connected" }],
     usage: { modelCalls: 0, inputTokens: 0, outputTokens: 0, apiCalls: 0, cacheHits: 0, deterministicActions: 0, estimatedCostUsd: 0, dailyBudgetUsd: 5 },

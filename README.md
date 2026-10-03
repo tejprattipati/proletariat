@@ -2,7 +2,7 @@
 
 One workspace for your agents, connected tools, and everyday work. Describe a workflow, connect exact resources, then let ordinary code do the repetitive work.
 
-**Build status:** active hackathon implementation. The first checkpoint contains the typed workflow engine and its tests. Frontend/backend integration and deployment are being added in subsequent commits; a published live app is not available yet. To exercise this checkpoint, run `npm ci` followed by `npm test -- tests/domain`.
+**Build status:** working hackathon prototype with five screens, a persistent backend/worker, direct Google adapters and a synthetic demo. The combined test suite currently passes 187 tests. Live Google and model credentials are not configured; external operations have been verified with injected provider responses, not a real account.
 
 ## Run on your Mac
 
@@ -17,10 +17,11 @@ Open the Vite URL (normally `http://127.0.0.1:5173`). The Express API runs on po
 
 ## What the app covers
 
-- Today: persistent tasks, deadlines, waiting states, duration estimates, calendar planning and rollover.
+- Today: actionable task feed, exact result/decision evidence, task-linked replies, deadlines, estimates, planning and rollover.
 - Agents: separate conversations attached to shared tasks/resources, with relevant updates surfaced today.
 - Resources: folder browsing, search, exact link/ID bindings, document sections and resumable selected/all-source scans.
 - Workflows: configurable triggers, permissions and direct Calendar/document actions.
+- Document recipes: bind a reference and destination once, then create a native copy with deterministic person/context substitutions and linked output receipts.
 - Email: drafts, individual sends and campaigns with recipient deduplication, pause/resume and explicit send controls.
 - Activity: source-linked outcomes, sync coverage and API/model usage.
 
@@ -57,4 +58,4 @@ Reading known IDs, browsing folders, repeat synchronization, planning arithmetic
 
 ## Development contracts
 
-See [shared contracts](docs/CONTRACTS.md) for endpoint shapes, action payloads and module ownership. The prototype uses a single backend instance and a single owner connection. Public multi-user Google OAuth, large-scale campaigns and horizontal scaling require further authentication, storage and operational work.
+See [shared contracts](docs/CONTRACTS.md) for endpoint shapes, action payloads and module ownership. The prototype uses a single backend instance and a single owner connection. Live Drive scans currently index metadata; content extraction and Gmail query selection are being completed in the next integration pass. Unsupported behavior is not silently represented as a successful read. Public multi-user Google OAuth, large-scale campaigns and horizontal scaling require further authentication, storage and operational work.

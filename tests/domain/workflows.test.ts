@@ -59,6 +59,11 @@ describe("workflow validation and authorization", () => {
 });
 
 describe("scheduled occurrence identity", () => {
+  it("uses the workspace calendar date for rollover when the workflow timezone differs", () => {
+    const state = workspace(); state.today = "2026-10-04";
+    state.workflows[0].timezone = "America/New_York";
+    expect(() => applyAction(state, { type: "workflow.run", payload: { id: state.workflows[0].id } }, new Date("2026-10-04T00:30:00Z"))).not.toThrow();
+  });
   it("honors local time and coalesces repeated DST hours", () => {
     const workflow = { ...workspace().workflows[0], timezone: "America/New_York", schedule: "01:00" };
     const first = workflowOccurrenceKey(workflow, new Date("2026-11-01T05:30:00Z"));

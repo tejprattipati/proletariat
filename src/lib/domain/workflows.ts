@@ -51,6 +51,8 @@ export function validateWorkflow(workflow: Workflow, state: WorkspaceState, loca
   if (workflow.trigger === "daily") assert(/^([01]\d|2[0-3]):[0-5]\d$/.test(workflow.schedule ?? ""), "Daily schedules must use HH:mm.");
   if (workflow.trigger === "interval") assert(/^[1-9]\d*$/.test(workflow.schedule ?? "") && Number(workflow.schedule) <= 10080, "Interval schedules must be minutes between 1 and 10080.");
   for (const id of workflow.resourceIds) assert(state.resources.some(resource => resource.id === id && resource.bound), `Resource ${id} must exist and be bound.`);
+  for (const id of workflow.draftIds ?? []) assert(state.drafts.some(draft => draft.id === id), `Draft ${id} must exist.`);
+  for (const id of workflow.campaignIds ?? []) assert(state.campaigns.some(campaign => campaign.id === id), `Campaign ${id} must exist.`);
   if (workflow.actions.includes("docs_write")) assert(state.resources.some(resource => workflow.resourceIds.includes(resource.id) && resource.kind === "document" && resource.role === "output"), "Document writes require a bound output document.");
   requirePermission(intersectPermissions(state.permissions, localPermissions), ...workflowPermissions(workflow));
 }

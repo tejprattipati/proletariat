@@ -1,11 +1,12 @@
 import { DateTime } from "luxon";
-import type { ActionRequest, ActionResult, Agent, Campaign, PermissionKey, Resource, ScanJob, Task, Workflow, WorkflowAction, WorkspaceState } from "../types";
+import type { ActionRequest, ActionResult, Agent, Campaign, PermissionKey, Recipe, Resource, Run, ScanJob, Task, Workflow, WorkflowAction, WorkspaceState } from "../types";
 import { assert, finiteNumber, localDate, operationKey, stableId, text, unique, validateDate, validateTimezone } from "./core";
 import { createDemoState } from "./fixtures";
 import { generatePlan, validateInterval } from "./planner";
 import { ingestTaskCandidates, rolloverTasks } from "./tasks";
 import { deduplicateRecipients, dispatchDemoCampaign, normalizeEmail, transitionCampaign } from "./campaigns";
 import { interpretIntent, requirePermission, validateWorkflow, workflowOccurrenceKey } from "./workflows";
+import { runDemoRecipe, validateRecipe } from "./recipes";
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -58,6 +59,8 @@ function taskChanges(task: Task, p: Record<string, unknown>, state: WorkspaceSta
   }
   if (p.pinned !== undefined) task.pinned = boolean(p.pinned, "Pinned");
   if (p.splittable !== undefined) task.splittable = boolean(p.splittable, "Splittable");
+  if ("needsInput" in p) task.needsInput = optionalString(p.needsInput, "Pending decision");
+  task.updatedAt = timestamp;
 }
 
 function readDemoSources(state: WorkspaceState, provider: "gmail" | "drive", resourceIds?: string[], includeAll = false): WorkspaceState {
@@ -71,8 +74,8 @@ function readDemoSources(state: WorkspaceState, provider: "gmail" | "drive", res
   return ingestTaskCandidates(state, candidates);
 }
 
-function planIntoState(state: WorkspaceState, date: string): { state: WorkspaceState; message: string } {
-  const result = generatePlan(state, date);
+function planIntoState(state: WorkspaceState, date: string, now: Date): { state: WorkspaceState; message: string } {
+  const result = generatePlan(state, date, { now });
   const zone = state.settings.timezone;
   const dayStart = DateTime.fromISO(date, { zone }).startOf("day").toMillis();
   const dayEnd = DateTime.fromISO(date, { zone }).plus({ days: 1 }).startOf("day").toMillis();
@@ -98,11 +101,18 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
     return { state: structuredClone(input), message: prior.message, entityId: prior.entityId };
   }
   let state = structuredClone(input);
+  state.recipes ??= [];
   const timestamp = now.toISOString();
   const id = (kind: string) => stableId(kind, action.type, action.requestId ?? timestamp, state.version);
   let entityId: string | undefined;
+  let receiptTaskId = optionalString(p.taskId, "Task ID");
+  if (receiptTaskId) find(state.tasks, receiptTaskId, "Task");
+  let recipeId: string | undefined;
+  let receiptStatus: Run["status"] = "succeeded";
+  let receiptAgentId: string | undefined;
+  let receiptSourceIds: string[] = [];
   let message = "Action completed.";
-  const externalActions = new Set(["resource.bind", "resource.browse", "sync.run", "scan.start", "scan.pause", "scan.resume", "draft.create", "draft.update", "draft.send", "calendar.upsert", "docs.write", "campaign.start", "campaign.resume"]);
+  const externalActions = new Set(["resource.bind", "resource.browse", "sync.run", "scan.start", "scan.pause", "scan.resume", "draft.create", "draft.update", "draft.send", "calendar.upsert", "docs.write", "campaign.start", "campaign.resume", "recipe.run"]);
   assert(state.settings.mode === "demo" || !externalActions.has(action.type), "This action requires the live Google adapter.", "LIVE_ADAPTER_REQUIRED");
 
   switch (action.type) {
@@ -110,7 +120,7 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
       const task: Task = { id: id("task"), title: text(p.title, "Title"), status: "open", priority: "P1", plannedDate: state.today,
         estimateMinutes: 30, notes: "", sourceIds: [], carryoverCount: 0 };
       taskChanges(task, p, state, timestamp);
-      state.tasks.push(task); entityId = task.id; message = "Task created."; break;
+      state.tasks.push(task); entityId = task.id; receiptTaskId = task.id; message = "Task created."; break;
     }
     case "task.update": {
       const task = find(state.tasks, p.id, "Task");
@@ -120,17 +130,60 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
         if (p.pinned !== undefined) state.plan = state.plan.map(block => block.taskId === task.id ? { ...block, pinned: task.pinned! } : block);
         if (["plannedDate", "estimateMinutes", "dueDate", "dueTime", "status", "nextActionDate"].some(field => field in p)) state.plan = state.plan.filter(block => block.taskId !== task.id || block.pinned);
       }
-      entityId = task.id; message = "Task updated."; break;
+      entityId = task.id; receiptTaskId = task.id; message = "Task updated."; break;
     }
     case "task.delete": {
       const task = find(state.tasks, p.id, "Task");
       state.tasks = state.tasks.filter(item => item.id !== task.id);
       state.plan = state.plan.filter(block => block.taskId !== task.id);
       state.processedKeys.push(operationKey("task-deleted", task.id));
+      entityId = task.id; receiptTaskId = task.id; receiptAgentId = task.agentId; receiptSourceIds = task.sourceIds;
       message = "Task deleted."; break;
     }
+    case "task.reply": {
+      const task = find(state.tasks, p.taskId ?? p.id, "Task");
+      assert(task.agentId, "Assign this task to an existing agent before saving a contextual note.");
+      const agent = find(state.agents, task.agentId, "Agent");
+      assert(p.agentId === undefined || p.agentId === agent.id, "This task belongs to a different agent.");
+      const content = text(p.message, "Message");
+      assert(content.length <= 20_000, "Task notes must be at most 20000 characters.");
+      agent.messages.push({ id: id("message"), role: "user", content, createdAt: timestamp, taskId: task.id, entityIds: [task.id] });
+      agent.lastActiveAt = timestamp; agent.unread = 0; agent.status = "updated";
+      agent.summary = `Note saved for ${task.title}.`;
+      task.updatedAt = timestamp;
+      entityId = task.id; receiptTaskId = task.id; receiptAgentId = agent.id;
+      message = "Contextual note saved on the existing task. No model was called or assistant reply generated.";
+      break;
+    }
+    case "recipe.create":
+    case "recipe.update": {
+      const previous = action.type === "recipe.update" ? find(state.recipes, p.id, "Recipe") : undefined;
+      const recipe: Recipe = {
+        id: previous?.id ?? id("recipe"), name: text(p.name, "Recipe name", previous?.name),
+        referenceResourceId: text(p.referenceResourceId, "Reference document", previous?.referenceResourceId),
+        destinationFolderId: text(p.destinationFolderId, "Destination folder", previous?.destinationFolderId),
+        agentId: "agentId" in p ? optionalString(p.agentId, "Agent") : previous?.agentId,
+        createdAt: previous?.createdAt ?? timestamp,
+      };
+      validateRecipe(state, recipe);
+      state.recipes = [...state.recipes.filter(item => item.id !== recipe.id), recipe];
+      entityId = recipe.id; recipeId = recipe.id; receiptAgentId = recipe.agentId; receiptSourceIds = [recipe.referenceResourceId];
+      message = "Reusable document recipe saved."; break;
+    }
+    case "recipe.run": {
+      const recipe = find(state.recipes, p.id, "Recipe");
+      const output = runDemoRecipe(state, recipe, id("resource"), {
+        title: text(p.title, "Document title"), context: text(p.context, "Context"), person: optionalString(p.person, "Person"), taskId: receiptTaskId,
+      }, now);
+      state.resources.push(output);
+      entityId = output.id; recipeId = recipe.id; receiptAgentId = recipe.agentId; receiptSourceIds = [recipe.referenceResourceId];
+      const task = receiptTaskId ? find(state.tasks, receiptTaskId, "Task") : undefined;
+      if (task) { task.updatedAt = timestamp; receiptAgentId = task.agentId ?? recipe.agentId; }
+      message = "Created a synthetic personalized document in the bound destination folder. The reference is unchanged; no Google API or model was called.";
+      break;
+    }
     case "plan.generate": {
-      const result = planIntoState(state, validateDate(text(p.date, "Date", state.today)));
+      const result = planIntoState(state, validateDate(text(p.date, "Date", state.today)), now);
       message = result.message; break;
     }
     case "plan.rollover": {
@@ -181,7 +234,7 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
         query: p.query === undefined ? previous?.query ?? "" : String(p.query), actions: p.actions === undefined ? (p.intent === undefined && previous ? previous.actions : interpretIntent(intent)) : strings(p.actions, "Actions") as WorkflowAction[],
         resourceIds: p.resourceIds === undefined ? previous?.resourceIds ?? [] : strings(p.resourceIds, "Resources"), timezone: text(p.timezone, "Timezone", previous?.timezone ?? state.settings.timezone),
         schedule: p.schedule === undefined ? previous?.schedule : optionalString(p.schedule, "Schedule"), calendarId: p.calendarId === undefined ? previous?.calendarId : optionalString(p.calendarId, "Calendar"),
-        recipientIds: p.recipientIds === undefined ? previous?.recipientIds : strings(p.recipientIds, "Recipients"), lastRunAt: previous?.lastRunAt };
+        recipientIds: p.recipientIds === undefined ? previous?.recipientIds : strings(p.recipientIds, "Recipients"), draftIds: p.draftIds === undefined ? previous?.draftIds : strings(p.draftIds, "Drafts"), campaignIds: p.campaignIds === undefined ? previous?.campaignIds : strings(p.campaignIds, "Campaigns"), lastRunAt: previous?.lastRunAt };
       validateWorkflow(workflow, state);
       state.workflows = [...state.workflows.filter(item => item.id !== workflow.id), workflow];
       for (const agent of state.agents) agent.workflowIds = agent.workflowIds.filter(value => value !== workflow.id);
@@ -190,6 +243,7 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
     }
     case "workflow.run": {
       const workflow = find(state.workflows, p.id, "Workflow");
+      receiptAgentId = workflow.agentId; receiptSourceIds = [...workflow.resourceIds];
       assert(workflow.enabled, "Workflow is disabled.");
       assert(workflow.mode !== "review" || p.confirmed === true, "Review this workflow and confirm it before execution.", "REVIEW_REQUIRED");
       validateWorkflow(workflow, state);
@@ -198,11 +252,12 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
       const external = workflow.actions.some(value => ["extract_tasks", "calendar_upsert", "docs_write", "draft", "send", "campaign"].includes(value));
       assert(state.settings.mode === "demo" || !external, "Live source and write workflows require the Google adapter.", "LIVE_ADAPTER_REQUIRED");
       // Validate unresolved destinations before any execution, even when permissions are enabled.
-      if (workflow.actions.includes("send") || workflow.actions.includes("campaign")) assert(false, "Sending workflows require explicit reviewed draft or campaign IDs. Use the corresponding send or campaign action.", "DESTINATION_REQUIRED");
+      if (workflow.actions.includes("send")) assert(workflow.draftIds?.length && workflow.draftIds.every(id => state.drafts.some(draft => draft.id === id)), "Sending workflows require explicit reviewed draft IDs.", "DESTINATION_REQUIRED");
+      if (workflow.actions.includes("campaign")) assert(workflow.campaignIds?.length && workflow.campaignIds.every(id => state.campaigns.some(campaign => campaign.id === id)), "Sending workflows require explicit reviewed campaign IDs.", "DESTINATION_REQUIRED");
       for (const step of workflow.actions) {
-        if (step === "rollover") state = rolloverTasks(state, localDate(now, workflow.timezone));
+        if (step === "rollover") state = rolloverTasks(state, localDate(now, state.settings.timezone));
         if (step === "extract_tasks") state = readDemoSources(state, workflow.resourceIds.length ? "drive" : "gmail", workflow.resourceIds);
-        if (step === "plan") message = planIntoState(state, state.today).message;
+        if (step === "plan") message = planIntoState(state, state.today, now).message;
         if (step === "calendar_upsert") {
           for (const block of state.plan) {
             const task = find(state.tasks, block.taskId, "Task");
@@ -216,7 +271,14 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
           resource.content = `Synthetic workflow summary for ${state.today}\n${state.tasks.map(task => `- ${task.title} (${task.status})`).join("\n")}`;
           resource.modifiedAt = timestamp;
         }
-        if (step === "draft") {
+        if (step === "send") for (const draftId of workflow.draftIds!) state = applyAction(state, { type: "draft.send", payload: { id: draftId }, requestId: `${action.requestId ?? occurrence ?? timestamp}:send:${draftId}` }, now).state;
+        if (step === "campaign") for (const campaignId of workflow.campaignIds!) {
+          const campaign = find(state.campaigns, campaignId, "Campaign");
+          if (campaign.status === "completed" || campaign.status === "cancelled") continue;
+          if (campaign.status === "running") state = dispatchDemoCampaign(state, campaignId, now);
+          else state = applyAction(state, { type: campaign.status === "paused" ? "campaign.resume" : "campaign.start", payload: { id: campaignId }, requestId: `${action.requestId ?? occurrence ?? timestamp}:campaign:${campaignId}` }, now).state;
+        }
+        if (step === "draft" && !workflow.draftIds?.length) {
           const draftId = stableId("draft", workflow.id, occurrence ?? action.requestId ?? timestamp);
           if (!state.drafts.some(value => value.id === draftId)) state.drafts.push({ id: draftId, to: "review@example.com", subject: workflow.name, body: `Synthetic review draft: ${workflow.intent}`, status: "draft", mode: "demo", updatedAt: timestamp });
         }
@@ -268,7 +330,7 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
       if (p.coverage === "all") requirePermission(state.permissions, p.provider === "gmail" ? "gmailFull" : "driveFull");
       const count = p.provider === "gmail" ? (p.coverage === "all" ? 3 : 1) : state.resources.filter(resource => p.coverage === "all" || resource.bound).length;
       const job: ScanJob = { id: id("scan"), provider: p.provider, coverage: p.coverage, status: "running", discovered: count, read: 0, analyzed: 0, skipped: 0, failed: 0, cursor: "demo:0", createdAt: timestamp, mode: "demo" };
-      state.scans.push(job); entityId = job.id; message = `Synthetic ${p.coverage} scan started; ${count} items discovered.`; break;
+      state.scans.push(job); entityId = job.id; receiptStatus = "pending"; message = `Synthetic ${p.coverage} scan started; ${count} items discovered.`; break;
     }
     case "scan.pause": {
       const job = find(state.scans, p.id, "Scan");
@@ -333,7 +395,12 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
       if (transition === "start" || transition === "resume") requirePermission(state.permissions, "send", "bulkSend");
       transitionCampaign(campaign, transition);
       if (transition === "start" || transition === "resume") state = dispatchDemoCampaign(state, campaign.id, now);
-      entityId = campaign.id; message = `Synthetic campaign ${find(state.campaigns, campaign.id, "Campaign").status}. No real messages were sent.`; break;
+      entityId = campaign.id;
+      const status = find(state.campaigns, campaign.id, "Campaign").status;
+      const recipients = find(state.campaigns, campaign.id, "Campaign").recipients;
+      receiptStatus = recipients.some(recipient => recipient.status === "unknown") ? "unknown" : recipients.some(recipient => recipient.status === "failed") ? "failed" : ["scheduled", "running", "paused"].includes(status) ? "pending" : "succeeded";
+      message = state.settings.mode === "demo" ? `Synthetic campaign ${status}. No real messages were sent.` : `Campaign ${status}.`;
+      break;
     }
     case "calendar.upsert": {
       requirePermission(state.permissions, "calendarWrite");
@@ -355,8 +422,14 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
   state.version = input.version + 1;
   state.usage.deterministicActions++;
   const runId = stableId("run", action.type, action.requestId ?? timestamp, state.version);
-  state.runs.unshift({ id: runId, title: action.type, description: message, status: "succeeded", createdAt: timestamp, mode: state.settings.mode,
-    workflowId: action.type === "workflow.run" ? entityId : undefined, modelCalls: 0, tokens: 0, apiCalls: 0, writes: 0, cacheHits: 0, sourceIds: entityId ? [entityId] : [] });
+  const linkedTask = state.tasks.find(task => task.id === receiptTaskId);
+  receiptAgentId ??= linkedTask?.agentId;
+  receiptSourceIds = unique([...receiptSourceIds, ...(linkedTask?.sourceIds ?? [])]);
+  const changedResourceIds = state.resources.filter(resource => JSON.stringify(input.resources.find(previous => previous.id === resource.id)) !== JSON.stringify(resource)).map(resource => resource.id);
+  const changedEventIds = state.events.filter(event => JSON.stringify(input.events.find(previous => previous.id === event.id)) !== JSON.stringify(event)).map(event => event.id);
+  state.runs.unshift({ id: runId, title: action.type, description: message, status: receiptStatus, createdAt: timestamp, mode: state.settings.mode,
+    workflowId: action.type === "workflow.run" ? entityId : undefined, agentId: receiptAgentId, taskId: receiptTaskId, recipeId,
+    changedResourceIds, changedEventIds, modelCalls: 0, tokens: 0, apiCalls: 0, writes: 0, cacheHits: 0, sourceIds: receiptSourceIds });
   if (requestPrefix) state.processedKeys.push(`${requestPrefix}${JSON.stringify({ signature, entityId, message })}`);
   return { state, message, entityId };
 }
