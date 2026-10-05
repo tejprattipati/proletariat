@@ -10,12 +10,16 @@ async function parseBinary(bytes: Uint8Array, kind:'pdf'|'docx'): Promise<{text:
   if(parsing>=2) throw new Error('Two files are being extracted. Try again shortly.');
   parsing++;
   try { return await new Promise((resolve,reject)=>{
-    const worker=new Worker(new URL('./parse-worker.ts',import.meta.url),{workerData:{bytes,kind},execArgv:['--import','tsx'],resourceLimits:{maxOldGenerationSizeMb:128}});
+    // Node 24's newer V8/parser initialization exceeds 128 MiB even for a tiny PDF.
+    const worker=new Worker(new URL('./parse-worker.ts',import.meta.url),{workerData:{bytes,kind},execArgv:['--import','tsx'],resourceLimits:{maxOldGenerationSizeMb:256}});
     let settled=false;
     const finish=(error?:Error,result?:{text:string;truncated:boolean})=>{if(settled)return;settled=true;clearTimeout(timer);if(error)reject(error);else resolve(result!);};
     const timer=setTimeout(()=>{void worker.terminate();finish(new Error('Extraction exceeded 15 seconds. Try a smaller document.'));},15000);
     worker.once('message',result=>finish(result.ok?undefined:new Error(result.error),result));
-    worker.once('error',()=>finish(new Error('File extraction failed within the safe memory limit.')));
+    worker.once('error',(error:Error&{code?:string})=>{
+      const code=typeof error.code==='string'&&/^ERR_[A-Z_]+$/.test(error.code)?error.code:'WORKER_ERROR';
+      finish(new Error(code==='ERR_WORKER_OUT_OF_MEMORY'?'File extraction exceeded the safe memory limit.':`File extraction worker could not start (${code}).`));
+    });
     worker.once('exit',code=>{if(!settled)finish(new Error(`File extraction ended without a result (${code}).`));});
   }); } finally {parsing--;}
 }
