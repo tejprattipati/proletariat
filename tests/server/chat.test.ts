@@ -5,6 +5,7 @@ import { respondToChat } from "../../src/lib/server/chat";
 const execute = async (state: Parameters<typeof applyAction>[0], action: Parameters<typeof applyAction>[1]) => applyAction(state, action);
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 function modelEnv() {
+  vi.stubEnv("MODEL_PROVIDER", "api"); vi.stubEnv("ALLOW_PAID_API", "true");
   vi.stubEnv("OPENAI_API_KEY", "synthetic-model-key"); vi.stubEnv("OPENAI_MODEL", "synthetic-test-model");
   vi.stubEnv("MODEL_INPUT_USD_PER_MILLION", "1"); vi.stubEnv("MODEL_OUTPUT_USD_PER_MILLION", "1");
   vi.stubEnv("MAX_DAILY_MODEL_TOKENS", "1000000");
@@ -44,4 +45,20 @@ it("never calls the model after a zero budget and keeps direct commands availabl
   expect(fetchMock).not.toHaveBeenCalled();expect(result.message).toContain("budget");
   const coded=await respondToChat(result.state,state.agents[0].id,"add task: A coded command",execute,true);
   expect(coded.state.tasks.some(task=>task.title==="A coded command")).toBe(true);
+});
+
+it("answers connection questions directly without claiming Gmail or model access", async () => {
+  modelEnv(); const state=createDemoState(); const fetchMock=vi.fn();vi.stubGlobal("fetch",fetchMock);
+  const result=await respondToChat(state,state.agents[0].id,"Are you connected to my email?",execute,false);
+  expect(result.message).toContain("Google is not connected");
+  expect(result.message).toContain("No AI model is connected");
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+it("clearly explains unsupported general chat while preserving the message", async () => {
+  const state=createDemoState();
+  const result=await respondToChat(state,state.agents[0].id,"Write a beautiful essay",execute,false);
+  expect(result.message).toContain("cannot interpret general requests yet");
+  expect(result.message).toContain("Supported commands");
+  expect(result.state.agents[0].messages.at(-2)?.content).toBe("Write a beautiful essay");
+  expect(result.state.runs[0].modelCalls).toBe(0);
 });

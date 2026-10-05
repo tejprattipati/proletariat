@@ -1,61 +1,51 @@
 # proletariat
 
-One workspace for your agents, connected tools, and everyday work. Describe a workflow, connect exact resources, then let ordinary code do the repetitive work.
+One workspace for daily tasks, individual AI chats, and connected Google workflows. Select exact resources once; ordinary code handles repeated reads, planning, rollover, templates, and API writes.
 
-**Build status:** working hackathon prototype with five screens, a persistent backend/worker, direct Google adapters and a synthetic demo. The combined test suite currently passes 187 tests. Live Google and model credentials are not configured; external operations have been verified with injected provider responses, not a real account.
+This is a hackathon prototype. Google identity sign-in is required before any workspace data or controls load. Each verified Google subject owns separate sessions, workspaces, credentials, jobs, attachments, and ChatGPT registrations. Email matching never links accounts. Old single-owner data is retained separately and is not assigned to a new sign-in.
 
-## Run on your Mac
+## Run locally
 
-Requires Node 24 and npm.
+Requires Node 24 and npm. Copy `.env.example` to a private `.env`, configure Google identity and the encryption key as described in [setup](docs/DEPLOYMENT.md), then:
 
 ```sh
 npm ci
 npm run dev
 ```
 
-Open the Vite URL (normally `http://127.0.0.1:5173`). The Express API runs on port 3001. Synthetic demo data initializes automatically and persists in `.data/proletariat.sqlite`. No Google or model credentials are needed for demo mode.
+Open `http://127.0.0.1:5173`. Google identity login does not grant Gmail, Calendar, or Drive access. Those are separate choices in Connections. Runtime data lives in the ignored `.data` directory.
 
-## What the app covers
+## Included
 
-- Today: actionable task feed, exact result/decision evidence, task-linked replies, deadlines, estimates, planning and rollover.
-- Agents: separate conversations attached to shared tasks/resources, with relevant updates surfaced today.
-- Resources: folder browsing, search, exact link/ID bindings, document sections and resumable selected/all-source scans.
-- Workflows: configurable triggers, permissions and direct Calendar/document actions.
-- Document recipes: bind a reference and destination once, then create a native copy with deterministic person/context substitutions and linked output receipts.
-- Email: drafts, individual sends and campaigns with recipient deduplication, pause/resume and explicit send controls.
-- Activity: source-linked outcomes, sync coverage and API/model usage.
+- **Daily:** Gmail and Calendar read status, actual source excerpts, explicit task extraction, complete to-do list, and a primary reading conversation.
+- **Chats and agents:** independent named conversations, selectable agents, task-linked replies, local PDF/DOCX/text uploads, and an in-chat Drive chooser.
+- **Today:** actionable task feed, result evidence, estimates, calendar-aware plans, rollover, and completed-work filtering.
+- **Canonical tasks:** one stable record across priority, multiple categories, planned dates and hard deadlines; retained removal/restoration, lifecycle history, provider corrections, and source evidence.
+- **Canvas:** explicitly connected read-only inventory, resumable current-course/source-family pagination, submission facts, weekly new-versus-changed reports, and coverage gaps. Configure approved institution origins before connecting.
+- **Resources and recipes:** browse/search folders; bind exact files, tabs and managed ranges; copy a reference into a chosen folder with deterministic placeholder substitutions.
+- **Email and workflows:** drafts, controlled individual sends and campaigns, selected/full scans, automatic or review workflows, permissions, and durable operation receipts.
+- **Connections and appearance:** per-user Google/ChatGPT accounts, independent read/write/send controls, usage records, and muted themes.
 
-The public demo uses fictional data. Demo sends are simulations. Actual Google operations require the owner's separate OAuth connection, app permission toggles and a live workspace. A broad Google scope does not enable an app action by itself.
+Synthetic mode is available only after sign-in. Its operations use fictional data and never send messages. Live service operations require that user's OAuth grant and enabled capabilities. Actual Google writes and ChatGPT inference have not been tested against a real account in this implementation pass.
 
-## Frontend and backend
+## ChatGPT plan usage
 
-The Vite/React frontend is static and can run on GitHub Pages. The Express backend owns credentials, SQLite, external API operations, model calls and the scheduler. `VITE_API_URL` points the Pages frontend at the backend. GitHub Pages never executes server routes.
+Each user explicitly authorizes their own app-specific ChatGPT connection. Credentials are encrypted in that user's namespace; the app never reads CLI or desktop auth files. Public chat routes do not use a shared API key. Requests use the standard service tier. Coded commands, repeat synchronization, planning, rollover and deterministic recipes require no model tokens.
+
+The implemented consent callback is local loopback. Complete it on the computer running your backend; this is not yet a universally hosted sign-in flow for arbitrary remote users. The UI disables that flow against a remote backend and explains the limitation. Google sign-in does not automatically authorize or identify a ChatGPT account.
+
+Only a completed streamed response counts as verified inference. Failed, interrupted and quota-limited responses do not trigger returned tool actions. ChatGPT plan/credit limits still apply. The local token ceiling is a preflight guard and records actual usage; the preview API does not support a hard output-token cap. No percentage-savings claim is made without a measured baseline.
+
+## Verification and architecture
 
 ```sh
-npm run typecheck
 npm test
 npm run build
 npm run secrets:check
 ```
 
-For Pages, set the repository variable `VITE_API_URL` to the deployed backend HTTPS origin and enable GitHub Actions as the Pages source. The workflow builds using `/proletariat/` as its base path. See [deployment setup](docs/DEPLOYMENT.md) for backend hosting, persistence and OAuth requirements.
+React/Vite serves the frontend. Express owns APIs, encrypted OAuth storage, bounded extraction workers, and the scheduler; SQLite persists workspaces and operation journals. Google adapters use direct APIs with source provenance, account/grant isolation, resumable pages and unknown-write reconciliation. See [contracts](docs/CONTRACTS.md) and [Google adapter limits](src/lib/google/README.md).
 
-## Connecting live Google tools
+The [product specification](docs/PRODUCT_SPEC.md) records canonical task and Canvas requirements, including navigation, weekly reports, and acceptance criteria. Implemented paths are validated with fictional provider responses; real account coverage, consent and inference remain unverified. Existing Google workflows and permission controls remain required.
 
-Copy `.env.example` to a private `.env`, supply the server settings, and restart the backend. A deployed instance requires `APP_ACCESS_TOKEN`; enter that key in the frontend's Settings. It is held in memory and must be entered again after a page reload. Public visitors get separate synthetic workspaces and cannot use the owner's Google account.
-
-Configure a Google Web OAuth client for the backend callback, enable the needed APIs, and set a stable `TOKEN_ENCRYPTION_KEY`. Select capabilities in the app before connecting Google. OAuth consent remains a user action. Tokens are encrypted at rest; all runtime state stays in the ignored data directory or the configured persistent volume.
-
-Keep `.env`, tokens, private data, actual messages and exported documents out of Git. Never put secrets in a `VITE_` variable. The repository's public-file checker is one check, not a replacement for reviewing every staged change.
-
-## Chat and model cost
-
-Without model configuration, chat supports coded commands such as “add task: …”, “plan my day”, “sync inbox”, and “create a workflow …”, and reports facts from stored state. The UI labels this behavior. It does not pretend those replies came from a model.
-
-For conversational reasoning, configure `OPENAI_API_KEY`, `OPENAI_MODEL`, and the model's actual input/output prices. The implementation uses the [Responses API tool flow](https://developers.openai.com/api/docs/guides/function-calling). Model actions use the same checked services as buttons and jobs. Permissions cannot be enabled by model output. Bounded context, a turn limit, token ceiling and daily budget reduce uncontrolled usage.
-
-Reading known IDs, browsing folders, repeat synchronization, planning arithmetic, rollover and template operations use ordinary APIs/code. New text interpretation and conversational reasoning may still use model tokens. No percentage-savings claim is made without a matched benchmark.
-
-## Development contracts
-
-See [shared contracts](docs/CONTRACTS.md) for endpoint shapes, action payloads and module ownership. The prototype uses a single backend instance and a single owner connection. Live Drive scans currently index metadata; content extraction and Gmail query selection are being completed in the next integration pass. Unsupported behavior is not silently represented as a successful read. Public multi-user Google OAuth, large-scale campaigns and horizontal scaling require further authentication, storage and operational work.
+The Pages frontend is https://tejprattipati.github.io/proletariat/. Publishing static assets does not configure Google consent, make the Mac always online, or verify real provider access. Follow the current callback and private configuration checklist in [deployment setup](docs/DEPLOYMENT.md).

@@ -25,7 +25,8 @@ jobs:
       - run: npm run build
         env:
           GITHUB_PAGES: "true"
-          VITE_API_URL: ${{ vars.VITE_API_URL }}
+          # Current free Mac tunnel; update this public URL when the tunnel changes.
+          VITE_API_URL: https://besides-ccd-lately-relay.trycloudflare.com
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -41,11 +41,11 @@ describe("pure action reducer", () => {
     expect(done.tasks[0].completedAt).toBe(now.toISOString()); expect(done.plan).toHaveLength(0);
     expect(applyAction(done, { type: "task.update", payload: { id: "one", status: "open" } }, now).state.tasks[0].completedAt).toBeUndefined();
   });
-  it("deletes a task and its blocks", () => {
+  it("retains a removed task for history and removes its blocks", () => {
     const state = workspace(); state.tasks = [task("one")];
     const planned = applyAction(state, { type: "plan.generate" }, now).state;
     const result = applyAction(planned, { type: "task.delete", payload: { id: "one" } }, now);
-    expect(result.state.tasks).toHaveLength(0); expect(result.state.plan).toHaveLength(0);
+    expect(result.state.tasks).toHaveLength(1); expect(result.state.tasks[0].removedAt).toBe(now.toISOString()); expect(result.state.plan).toHaveLength(0);
   });
   it.each([
     { type: "task.create", payload: { title: "" } },
@@ -82,7 +82,9 @@ describe("pure action reducer", () => {
 describe("synthetic integrations", () => {
   it("does not duplicate the source-backed tasks already present in the demo", () => {
     const state = createDemoState(now);
-    expect(applyAction(state, { type: "sync.run", payload: { provider: "drive" } }, now).state.tasks).toEqual(state.tasks);
+    const refreshed = applyAction(state, { type: "sync.run", payload: { provider: "drive" } }, now).state.tasks;
+    expect(refreshed.map(task => task.id)).toEqual(state.tasks.map(task => task.id));
+    for (let i = 0; i < state.tasks.length; i++) expect(refreshed[i]).toMatchObject({ title: state.tasks[i].title, estimateMinutes: state.tasks[i].estimateMinutes, plannedDate: state.tasks[i].plannedDate, status: state.tasks[i].status });
   });
   it("syncs idempotently and keeps multiple sessions from one bound resource", () => {
     const state = workspace();

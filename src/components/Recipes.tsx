@@ -1,3 +1,4 @@
+import { isActiveTask } from './taskViews';
 import { useEffect, useState, type FormEvent } from 'react';
 import { ArrowRight, Check, Copy, FileText, Folder, Layers3, Pencil, Plus, Sparkles } from 'lucide-react';
 import type { Recipe, Resource } from '../lib/types';
@@ -8,16 +9,17 @@ export function Recipes({ state, run, busy, requestedSource, clearRequestedSourc
   const [selectedSource, setSelectedSource] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<Resource | null>(null);
+  const [reviewOutcome, setReviewOutcome] = useState(false);
   const recipes = state.recipes || [];
   const currentResources = state.resources.filter(r => r.mode === state.settings.mode);
   const documents = currentResources.filter(r => r.kind === 'document');
   const folders = currentResources.filter(r => r.kind === 'folder');
   const allowed = state.permissions.driveRead && state.permissions.docsWrite && state.permissions.driveWrite;
   useEffect(() => {
-    if (requestedSource) { setSelectedSource(requestedSource.id); setEditing('new'); setError(null); setCreated(null); }
+    if (requestedSource) { setSelectedSource(requestedSource.id); setEditing('new'); setError(null); setCreated(null); setReviewOutcome(false); }
   }, [requestedSource]);
   function close() { setEditing(null); clearRequestedSource(); setError(null); }
-  function open(recipe?: Recipe) { setEditing(recipe || 'new'); setSelectedSource(recipe?.referenceResourceId || ''); setError(null); setCreated(null); }
+  function open(recipe?: Recipe) { setEditing(recipe || 'new'); setSelectedSource(recipe?.referenceResourceId || ''); setError(null); setCreated(null); setReviewOutcome(false); }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy) return;
@@ -49,12 +51,12 @@ export function Recipes({ state, run, busy, requestedSource, clearRequestedSourc
     if (!shouldRun) { close(); return; }
     if (!recipeId) { setError('The backend did not return a saved recipe ID. Refresh the workspace before creating a document.'); return; }
     const result = await run('recipe.run', { id: recipeId, title: String(form.get('title') || '').trim(), context: String(form.get('context') || '').trim(), person: String(form.get('person') || '').trim(), taskId: form.get('taskId') || undefined });
-    if (!result) return;
+    if (!result) { setReviewOutcome(true); setError('Creation was not confirmed. Check Activity and the destination folder for a recorded or partial output before starting another run.'); return; }
     const receipt = result.state.runs.find(r => r.recipeId === recipeId && !priorRunIds.has(r.id) && r.changedResourceIds?.length);
     const outputId = receipt?.changedResourceIds?.[0] || result.entityId;
     const output = result.state.resources.find(r => r.id === outputId);
     if (output && receipt?.status === 'succeeded') { setCreated(output); close(); }
-    else { setError('The run needs review. Open Activity for the recorded outcome and any partially created document before retrying.'); }
+    else { setReviewOutcome(true); setError('The run needs review. Open Activity for the recorded outcome and any partially created document before retrying.'); }
   }
   return <>
     <section className="panel recipes-panel"><div className="recipes-heading"><span className="recipe-symbol"><Layers3 size={21} /></span><div><span className="eyebrow">GOOD STRUCTURE, REUSED</span><h2>Start from work you trust</h2><p>Save a document recipe. Create a new copy in the right folder, every time.</p></div><Button onClick={() => open()}><Plus size={15} />New recipe</Button></div>
@@ -71,11 +73,11 @@ export function Recipes({ state, run, busy, requestedSource, clearRequestedSourc
       <div className="form-grid"><Field label="Reference document"><select name="referenceResourceId" required value={selectedSource} onChange={e => setSelectedSource(e.target.value)}><option value="">Choose a document</option>{documents.map(r => <option key={r.id} value={r.id}>{r.name}{r.bound ? '' : ' · bind on save'}</option>)}</select></Field><Field label="Destination folder"><select name="destinationFolderId" required defaultValue={editing === 'new' ? '' : editing.destinationFolderId}><option value="">Choose a folder</option>{folders.map(r => <option key={r.id} value={r.id}>{r.name}{r.bound ? '' : ' · bind on save'}</option>)}</select></Field></div>
       {(!documents.length || !folders.length) && <p className="inline-help">Browse Drive or bind a document and folder before creating a recipe. The reference must be a document, and the destination must be a folder.</p>}
       <Field label="Agent (optional)"><select name="agentId" defaultValue={editing === 'new' ? '' : editing.agentId || ''}><option value="">No assigned agent</option>{state.agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>
-      <div className="recipe-run-fields"><div><Sparkles size={16} /><h3>This document</h3><Badge tone={state.settings.mode === 'live' ? 'green' : 'orange'}>{state.settings.mode}</Badge></div><Field label="New document title"><input name="title" required maxLength={250} placeholder="Project brief — new engagement" /></Field><Field label="Person or organization (optional)"><input name="person" maxLength={500} placeholder="Who is this document for?" /></Field><Field label="Context to include"><textarea name="context" rows={4} maxLength={30000} required placeholder="The specifics for this document: goals, constraints, background, and next steps…" /></Field><Field label="Link to a task (optional)"><select name="taskId"><option value="">No linked task</option>{state.tasks.filter(t => t.status !== 'done').map(t => <option key={t.id} value={t.id}>{t.title}</option>)}</select></Field></div>
+      <div className="recipe-run-fields"><div><Sparkles size={16} /><h3>This document</h3><Badge tone={state.settings.mode === 'live' ? 'green' : 'orange'}>{state.settings.mode}</Badge></div><Field label="New document title"><input name="title" required maxLength={250} placeholder="Project brief — new engagement" /></Field><Field label="Person or organization (optional)"><input name="person" maxLength={500} placeholder="Who is this document for?" /></Field><Field label="Context to include"><textarea name="context" rows={4} maxLength={30000} required placeholder="The specifics for this document: goals, constraints, background, and next steps…" /></Field><Field label="Link to a task (optional)"><select name="taskId"><option value="">No linked task</option>{state.tasks.filter(isActiveTask).map(t => <option key={t.id} value={t.id}>{t.title}</option>)}</select></Field></div>
       <div className="recipe-method"><ShieldIcon /><p><strong>Deterministic template merge.</strong> A native copy preserves the reference’s structure. Supported <code>{'{{title}}'}</code>, <code>{'{{person}}'}</code>, and <code>{'{{context}}'}</code> placeholders are replaced. If there is no context placeholder, a labeled context section is appended. Existing prose is not automatically rewritten. Demo copies preserve synthetic reference text.</p></div>
       {!allowed && <p className="inline-help">Creating a document requires Drive read, template creation, and Docs write permissions. Enable them in <a href="#connections" onClick={close}>Connections</a>. You can save the recipe first.</p>}
-      {error && <p className="inline-alert" role="alert">{error}</p>}
-      <div className="form-actions"><Button type="button" onClick={close}>Cancel</Button><Button name="intent" value="save" type="submit" formNoValidate disabled={!!busy || !state.permissions.driveRead}>Save recipe only</Button><Button name="intent" value="run" type="submit" variant="primary" loading={busy === 'recipe.run'} disabled={!!busy || !allowed}><Copy size={15} />Create document</Button></div>
+      {error && <p className="inline-alert" role="alert">{error}</p>}{reviewOutcome && <a className="button button-secondary" href="#activity" onClick={close}>Review Activity<ArrowRight size={14} /></a>}
+      <div className="form-actions"><Button type="button" onClick={close}>Cancel</Button><Button name="intent" value="save" type="submit" formNoValidate disabled={!!busy || !state.permissions.driveRead}>Save recipe only</Button><Button name="intent" value="run" type="submit" variant="primary" loading={busy === 'recipe.run'} disabled={!!busy || !allowed || reviewOutcome}><Copy size={15} />Create document</Button></div>
     </form></Modal>}
   </>;
 }

@@ -7,6 +7,8 @@ import { ingestTaskCandidates, rolloverTasks } from "./tasks";
 import { deduplicateRecipients, dispatchDemoCampaign, normalizeEmail, transitionCampaign } from "./campaigns";
 import { interpretIntent, requirePermission, validateWorkflow, workflowOccurrenceKey } from "./workflows";
 import { runDemoRecipe, validateRecipe } from "./recipes";
+import { isActiveTask, recordTaskHistory, reconcileTaskProjections } from "./lifecycle";
+import { getTaskSourceState, setTaskSourceState } from "./identity";
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -39,7 +41,7 @@ function taskChanges(task: Task, p: Record<string, unknown>, state: WorkspaceSta
   if (p.title !== undefined) task.title = text(p.title, "Title");
   if (p.notes !== undefined) { assert(typeof p.notes === "string", "Notes must be text."); task.notes = p.notes; }
   if (p.status !== undefined) {
-    assert(["open", "in_progress", "waiting", "done"].includes(String(p.status)), "Unsupported task status.");
+    assert(["open", "in_progress", "waiting", "blocked", "done"].includes(String(p.status)), "Unsupported task status.");
     task.status = p.status as Task["status"];
     task.completedAt = task.status === "done" ? task.completedAt ?? timestamp : undefined;
   }
@@ -60,18 +62,22 @@ function taskChanges(task: Task, p: Record<string, unknown>, state: WorkspaceSta
   if (p.pinned !== undefined) task.pinned = boolean(p.pinned, "Pinned");
   if (p.splittable !== undefined) task.splittable = boolean(p.splittable, "Splittable");
   if ("needsInput" in p) task.needsInput = optionalString(p.needsInput, "Pending decision");
+  if ("nextAction" in p) task.nextAction = optionalString(p.nextAction, "Next action");
+  if (p.categories !== undefined) task.categories = unique(strings(p.categories, "Categories").map(category => text(category, "Category")));
+  const editableFields = ["title", "notes", "status", "priority", "estimateMinutes", "plannedDate", "dueDate", "dueTime", "nextActionDate", "agentId", "pinned", "splittable", "needsInput", "nextAction", "categories"];
+  task.userEditedFields = unique([...(task.userEditedFields ?? []), ...editableFields.filter(field => Object.hasOwn(p, field))]).sort();
   task.updatedAt = timestamp;
 }
 
-function readDemoSources(state: WorkspaceState, provider: "gmail" | "drive", resourceIds?: string[], includeAll = false): WorkspaceState {
+function readDemoSources(state: WorkspaceState, provider: "gmail" | "drive", resourceIds?: string[], includeAll = false, now?: Date): WorkspaceState {
   requirePermission(state.permissions, provider === "gmail" ? "gmailRead" : "driveRead");
-  if (provider === "gmail") return ingestTaskCandidates(state, [{ sourceId: "demo-email-project", sourceVersion: "1", itemId: "project-followup", title: "Reply to the example project check-in", plannedDate: state.today, estimateMinutes: 15, notes: "Synthetic message from alex@example.com.", agentId: state.agents[0]?.id }]);
+  if (provider === "gmail") return ingestTaskCandidates(state, [{ sourceId: "demo-email-project", sourceVersion: "1", itemId: "project-followup", title: "Reply to the example project check-in", plannedDate: state.today, estimateMinutes: 15, notes: "Synthetic message from alex@example.com.", agentId: state.agents[0]?.id }], now);
   const candidates = state.resources.filter(resource => (includeAll || resource.bound) && (!resourceIds || resourceIds.includes(resource.id)))
     .flatMap(resource => (resource.content ?? "").split("\n").flatMap((line, index) => {
       const match = line.match(/^\s*(?:task|todo|session|action):\s*(.+)$/i);
       return match ? [{ sourceId: resource.id, sourceVersion: resource.modifiedAt, itemId: `line-${index}`, title: match[1].trim(), plannedDate: state.today, estimateMinutes: 30, notes: `Extracted from synthetic resource ${resource.name}.` }] : [];
     }));
-  return ingestTaskCandidates(state, candidates);
+  return ingestTaskCandidates(state, candidates, now);
 }
 
 function planIntoState(state: WorkspaceState, date: string, now: Date): { state: WorkspaceState; message: string } {
@@ -100,6 +106,7 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
     assert(prior.signature === signature, "Request ID was already used for a different action.", "IDEMPOTENCY_CONFLICT");
     return { state: structuredClone(input), message: prior.message, entityId: prior.entityId };
   }
+  if (action.type.startsWith("task.") && p.expectedVersion !== undefined) assert(Number.isInteger(p.expectedVersion) && p.expectedVersion === input.version, "The workspace changed. Refresh before editing this task.", "REVISION_CONFLICT");
   let state = structuredClone(input);
   state.recipes ??= [];
   const timestamp = now.toISOString();
@@ -120,28 +127,48 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
       const task: Task = { id: id("task"), title: text(p.title, "Title"), status: "open", priority: "P1", plannedDate: state.today,
         estimateMinutes: 30, notes: "", sourceIds: [], carryoverCount: 0 };
       taskChanges(task, p, state, timestamp);
+      recordTaskHistory(state, "created", undefined, task, timestamp);
       state.tasks.push(task); entityId = task.id; receiptTaskId = task.id; message = "Task created."; break;
     }
     case "task.update": {
       const task = find(state.tasks, p.id, "Task");
+      assert(!task.removedAt, "Restore this removed task before editing it.", "TASK_REMOVED");
+      const before = structuredClone(task);
       taskChanges(task, p, state, timestamp);
-      if (task.status === "done") state.plan = state.plan.filter(block => block.taskId !== task.id);
+      if (!isActiveTask(task) || task.status === "blocked") state.plan = state.plan.filter(block => block.taskId !== task.id);
       else {
         if (p.pinned !== undefined) state.plan = state.plan.map(block => block.taskId === task.id ? { ...block, pinned: task.pinned! } : block);
         if (["plannedDate", "estimateMinutes", "dueDate", "dueTime", "status", "nextActionDate"].some(field => field in p)) state.plan = state.plan.filter(block => block.taskId !== task.id || block.pinned);
       }
+      const provider = getTaskSourceState(state, task.id);
+      if (provider) setTaskSourceState(state, task, provider.values);
+      recordTaskHistory(state, before.status !== "done" && task.status === "done" ? "completed" : "updated", before, task, timestamp);
       entityId = task.id; receiptTaskId = task.id; message = "Task updated."; break;
     }
     case "task.delete": {
       const task = find(state.tasks, p.id, "Task");
-      state.tasks = state.tasks.filter(item => item.id !== task.id);
+      const before = structuredClone(task);
+      if (!task.removedAt) { task.removedAt = timestamp; task.updatedAt = timestamp; }
       state.plan = state.plan.filter(block => block.taskId !== task.id);
-      state.processedKeys.push(operationKey("task-deleted", task.id));
+      const tombstone = operationKey("task-deleted", task.id);
+      if (!state.processedKeys.includes(tombstone)) state.processedKeys.push(tombstone);
+      recordTaskHistory(state, "removed", before, task, timestamp);
       entityId = task.id; receiptTaskId = task.id; receiptAgentId = task.agentId; receiptSourceIds = task.sourceIds;
-      message = "Task deleted."; break;
+      message = "Task removed from active views; its identity and history are retained."; break;
+    }
+    case "task.restore": {
+      const task = find(state.tasks, p.id, "Task");
+      const before = structuredClone(task);
+      if (task.removedAt) { task.removedAt = undefined; task.updatedAt = timestamp; }
+      state.processedKeys = state.processedKeys.filter(key => key !== operationKey("task-deleted", task.id));
+      recordTaskHistory(state, "restored", before, task, timestamp);
+      entityId = task.id; receiptTaskId = task.id;
+      message = "Task restored with its original identity and history."; break;
     }
     case "task.reply": {
       const task = find(state.tasks, p.taskId ?? p.id, "Task");
+      assert(!task.removedAt, "Restore this removed task before replying to it.", "TASK_REMOVED");
+      const before = structuredClone(task);
       assert(task.agentId, "Assign this task to an existing agent before saving a contextual note.");
       const agent = find(state.agents, task.agentId, "Agent");
       assert(p.agentId === undefined || p.agentId === agent.id, "This task belongs to a different agent.");
@@ -151,6 +178,7 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
       agent.lastActiveAt = timestamp; agent.unread = 0; agent.status = "updated";
       agent.summary = `Note saved for ${task.title}.`;
       task.updatedAt = timestamp;
+      recordTaskHistory(state, "updated", before, task, timestamp);
       entityId = task.id; receiptTaskId = task.id; receiptAgentId = agent.id;
       message = "Contextual note saved on the existing task. No model was called or assistant reply generated.";
       break;
@@ -178,7 +206,7 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
       state.resources.push(output);
       entityId = output.id; recipeId = recipe.id; receiptAgentId = recipe.agentId; receiptSourceIds = [recipe.referenceResourceId];
       const task = receiptTaskId ? find(state.tasks, receiptTaskId, "Task") : undefined;
-      if (task) { task.updatedAt = timestamp; receiptAgentId = task.agentId ?? recipe.agentId; }
+      if (task) { const before = structuredClone(task); task.updatedAt = timestamp; recordTaskHistory(state, "updated", before, task, timestamp); receiptAgentId = task.agentId ?? recipe.agentId; }
       message = "Created a synthetic personalized document in the bound destination folder. The reference is unchanged; no Google API or model was called.";
       break;
     }
@@ -187,7 +215,7 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
       message = result.message; break;
     }
     case "plan.rollover": {
-      state = rolloverTasks(state, validateDate(text(p.date, "Date")));
+      state = rolloverTasks(state, validateDate(text(p.date, "Date")), now);
       message = state.settings.rolloverEnabled ? "Unfinished tasks rolled forward; original deadlines preserved." : "Workspace date advanced; automatic rollover is disabled."; break;
     }
     case "settings.update": {
@@ -255,8 +283,8 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
       if (workflow.actions.includes("send")) assert(workflow.draftIds?.length && workflow.draftIds.every(id => state.drafts.some(draft => draft.id === id)), "Sending workflows require explicit reviewed draft IDs.", "DESTINATION_REQUIRED");
       if (workflow.actions.includes("campaign")) assert(workflow.campaignIds?.length && workflow.campaignIds.every(id => state.campaigns.some(campaign => campaign.id === id)), "Sending workflows require explicit reviewed campaign IDs.", "DESTINATION_REQUIRED");
       for (const step of workflow.actions) {
-        if (step === "rollover") state = rolloverTasks(state, localDate(now, state.settings.timezone));
-        if (step === "extract_tasks") state = readDemoSources(state, workflow.resourceIds.length ? "drive" : "gmail", workflow.resourceIds);
+        if (step === "rollover") state = rolloverTasks(state, localDate(now, state.settings.timezone), now);
+        if (step === "extract_tasks") state = readDemoSources(state, workflow.resourceIds.length ? "drive" : "gmail", workflow.resourceIds, false, now);
         if (step === "plan") message = planIntoState(state, state.today, now).message;
         if (step === "calendar_upsert") {
           for (const block of state.plan) {
@@ -320,7 +348,7 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
       const provider = p.provider ?? "gmail";
       assert(provider === "gmail" || provider === "drive", "Provider must be gmail or drive.");
       const count = state.tasks.length;
-      state = readDemoSources(state, provider);
+      state = readDemoSources(state, provider, undefined, false, now);
       message = `Synthetic sync completed. ${state.tasks.length - count} new task(s); existing identities preserved.`; break;
     }
     case "scan.start": {
@@ -342,7 +370,7 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
       assert(job.status === "paused" || job.status === "running" || job.status === "queued", "This scan cannot resume.");
       requirePermission(state.permissions, job.provider === "gmail" ? "gmailRead" : "driveRead");
       if (job.coverage === "all") requirePermission(state.permissions, job.provider === "gmail" ? "gmailFull" : "driveFull");
-      state = readDemoSources(state, job.provider, undefined, job.coverage === "all");
+      state = readDemoSources(state, job.provider, undefined, job.coverage === "all", now);
       const updated = find(state.scans, job.id, "Scan");
       const resources = state.resources.filter(resource => job.coverage === "all" || resource.bound);
       updated.discovered = job.provider === "gmail" ? updated.discovered : resources.length;
@@ -420,6 +448,7 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
     default: assert(false, `Unsupported action: ${action.type}`, "UNSUPPORTED_ACTION");
   }
   state.version = input.version + 1;
+  reconcileTaskProjections(state);
   state.usage.deterministicActions++;
   const runId = stableId("run", action.type, action.requestId ?? timestamp, state.version);
   const linkedTask = state.tasks.find(task => task.id === receiptTaskId);

@@ -19,7 +19,7 @@ export function createDemoState(now = new Date()): WorkspaceState {
   const state: WorkspaceState = {
     version: 1, today,
     settings: { timezone: "UTC", workingHoursStart: "09:00", workingHoursEnd: "17:00", rolloverEnabled: true, mode: "demo" },
-    permissions: { gmailRead: true, gmailFull: false, driveRead: true, driveFull: false, driveWrite: false, calendarWrite: false, docsWrite: false, draft: true, send: false, bulkSend: false },
+    permissions: { gmailRead: true, gmailFull: false, driveRead: true, driveFull: false, driveWrite: false, calendarRead: false, calendarWrite: false, docsWrite: false, draft: true, send: false, bulkSend: false },
     tasks: [
       task(stableId("task", "demo-project-notes", "line-0"), "Review the project outline", 45, { priority: "P0", dueDate: today, dueTime: "12:00", agentId: "agent-work", sourceIds: ["demo-project-notes"] }),
       task(stableId("task", "demo-session-notes", "line-0"), "Prepare for the design session", 30, { dueDate: today, agentId: "agent-learning", sourceIds: ["demo-session-notes"] }),

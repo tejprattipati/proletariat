@@ -53,7 +53,7 @@ export function createSyntheticGoogleAdapter(options: SyntheticOptions = {}) {
     if (url.pathname.endsWith('/history')) return json({ history: [], historyId: 'synthetic-gmail-history-2' });
     if (url.pathname.endsWith('/messages') && method === 'GET') return page([{ id: 'synthetic-message-1', threadId: 'synthetic-thread-1' }, { id: 'synthetic-message-2', threadId: 'synthetic-thread-2' }], 'messages');
     if (/\/messages\/synthetic-message-/.test(url.pathname)) return json({ id: url.pathname.split('/').at(-1), threadId: 'synthetic-thread-1', snippet: 'Fictional example message', payload: { mimeType: 'text/plain', headers: [{ name: 'From', value: 'sender@example.com' }], body: { data: Buffer.from('Fictional text for adapter tests.').toString('base64url') } } });
-    if (/\/threads\/synthetic-thread-/.test(url.pathname)) return json({ messages: [{ id: 'synthetic-message-1', threadId: url.pathname.split('/').at(-1), snippet: 'Fictional example' }] });
+    if (/\/threads\/synthetic-thread-/.test(url.pathname)) return json({ messages: [{ id: 'synthetic-message-1', threadId: url.pathname.split('/').at(-1), snippet: 'Fictional example', payload: { mimeType: 'text/plain', body: { data: Buffer.from('Fictional selected thread text.').toString('base64url') } } }] });
     if (url.pathname.endsWith('/drafts') && method === 'POST') { const id = `synthetic-draft-${++draftSequence}`; drafts.set(id, body); return json({ id }); }
     if (/\/drafts\/synthetic-draft-/.test(url.pathname) && method === 'PUT') { const id = url.pathname.split('/').at(-1)!; drafts.set(id, body); return json({ id }); }
     if (url.pathname.endsWith('/send')) {
@@ -62,7 +62,8 @@ export function createSyntheticGoogleAdapter(options: SyntheticOptions = {}) {
       if (options.sendFailure === 'denied') return json({ error: 'Synthetic denied' }, 403);
       return json({ id: 'synthetic-accepted-message' });
     }
-    if (url.hostname === 'docs.googleapis.com' && method === 'GET') return json({ documentId: url.pathname.split('/').at(-1), revisionId: 'synthetic-revision-1', tabs: [{ tabProperties: { tabId: 't.synthetic' }, documentTab: { body: { content: [{ paragraph: { elements: [{ textRun: { content: options.documentText ?? '{{title}}\nPrepared for {{person}}\n{{context}}\n' } }] } }] }, namedRanges: { managed: { namedRanges: [{ namedRangeId: 'synthetic-range-1' }] } } } }] });
+    if (url.hostname === 'sheets.googleapis.com') return url.pathname.includes('/values/') ? json({ values: [['Task: Review fictional sample', 'Example only']] }) : json({ sheets: [{ properties: { sheetId: 0, title: 'Example', gridProperties: { rowCount: 2, columnCount: 2 } } }] });
+    if (url.hostname === 'docs.googleapis.com' && method === 'GET') return json({ documentId: url.pathname.split('/').at(-1), revisionId: 'synthetic-revision-1', tabs: [{ tabProperties: { tabId: 't.synthetic' }, documentTab: { body: { content: [{ paragraph: { elements: [{ startIndex: 1, textRun: { content: options.documentText ?? '{{title}}\nPrepared for {{person}}\n{{context}}\n' } }] } }] }, namedRanges: { managed: { namedRanges: [{ namedRangeId: 'synthetic-range-1', ranges: [{ startIndex: 1, endIndex: 10, tabId: 't.synthetic' }] }] } } } }] });
     if (url.hostname === 'docs.googleapis.com' && method === 'POST') {
       if (options.documentWriteFailure === 'timeout') throw new TypeError('Synthetic write response lost');
       if (options.documentWriteFailure === 'denied') return json({ error: 'Synthetic write denied' }, 403);
@@ -86,7 +87,8 @@ export function createSyntheticGoogleAdapter(options: SyntheticOptions = {}) {
       for (const collection of [copy.resources, copy.drafts, copy.campaigns, copy.scans]) for (const item of collection) item.mode = 'live';
       const result = await integration.execute(copy, action);
       result.state.settings.mode = 'demo';
-      for (const collection of [result.state.resources, result.state.drafts, result.state.campaigns, result.state.scans, result.state.runs]) for (const item of collection) item.mode = 'demo';
+      for (const collection of [result.state.resources, result.state.drafts, result.state.campaigns, result.state.scans, result.state.runs, result.state.attachments ?? []]) for (const item of collection) item.mode = 'demo';
+      if (result.state.daily) result.state.daily.mode = 'demo';
       result.message = `Synthetic demo: ${result.message}`;
       // Mock HTTP traffic is exposed in calls, never counted as real Google usage or writes.
       result.state.usage.apiCalls = state.usage.apiCalls;

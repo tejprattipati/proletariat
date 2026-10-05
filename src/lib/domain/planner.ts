@@ -1,6 +1,7 @@
 import { DateTime } from "luxon";
 import type { PlanBlock, WorkspaceState } from "../types";
 import { assert, stableId, validateDate, validateTimezone } from "./core";
+import { hasUnknownProviderState, hasUnverifiedRequirement, isActiveTask } from "./lifecycle";
 
 type Interval = { start: number; end: number };
 export interface PlanResult { blocks: PlanBlock[]; unscheduledTaskIds: string[]; remainingMinutes: Record<string, number>; conflicts: string[]; }
@@ -69,7 +70,10 @@ export function generatePlan(state: WorkspaceState, date = state.today, options:
     busy.push(interval);
     eventIntervals.push(interval);
   }
-  const blocks = state.plan.filter(block => block.pinned && instant(block.start) < dayEnd && instant(block.end) > dayStart).map(block => ({ ...block }));
+  const blocks = state.plan.filter(block => {
+    const task = state.tasks.find(task => task.id === block.taskId);
+    return block.pinned && (!task || (isActiveTask(task) && task.status !== "blocked" && !hasUnknownProviderState(task) && !hasUnverifiedRequirement(task))) && instant(block.start) < dayEnd && instant(block.end) > dayStart;
+  }).map(block => ({ ...block }));
   const conflicts: string[] = [];
   const pinnedMinutes: Record<string, number> = {};
   const pins: Interval[] = [];
@@ -83,13 +87,14 @@ export function generatePlan(state: WorkspaceState, date = state.today, options:
     pins.push({ start: interval.start - buffer * minute, end: interval.end + buffer * minute });
     busy.push(pins.at(-1)!);
   }
-  const tasks = state.tasks.filter(task => task.status !== "done" && task.plannedDate <= date &&
+  const tasks = state.tasks.filter(task => isActiveTask(task) && !hasUnknownProviderState(task) && !hasUnverifiedRequirement(task) && task.status !== "blocked" && task.plannedDate <= date &&
     (!task.nextActionDate || task.nextActionDate <= date) && (task.status !== "waiting" || Boolean(task.nextActionDate && task.nextActionDate <= date)))
     .sort((a, b) => a.priority.localeCompare(b.priority) || (a.dueDate ?? "9999").localeCompare(b.dueDate ?? "9999") ||
       (a.dueTime ?? "23:59").localeCompare(b.dueTime ?? "23:59") || a.plannedDate.localeCompare(b.plannedDate) || a.id.localeCompare(b.id));
   const remainingMinutes: Record<string, number> = {};
   for (const task of tasks) {
     assert(Number.isFinite(task.estimateMinutes) && task.estimateMinutes > 0, `Task ${task.id} needs a positive duration.`);
+    if (task.dueDate && task.dueDate < date) conflicts.push(`Task ${task.id} is already past its deadline ${task.dueDate}; this plan does not change that deadline.`);
     let remaining = Math.max(0, task.estimateMinutes - (pinnedMinutes[task.id] ?? 0));
     let limit = end;
     if (task.dueDate === date && task.dueTime) limit = Math.min(limit, wallTime(task.dueTime));

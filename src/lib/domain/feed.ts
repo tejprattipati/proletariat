@@ -1,6 +1,7 @@
 import type { AgentMessage, CalendarEvent, Resource, Run, Task, WorkspaceState } from "../types";
 import { assert, localDate, unique } from "./core";
 import { sortReceipts, summarizeReceiptUsage, type ReceiptUsage } from "./receipts";
+import { hasUnknownProviderState, hasUnverifiedRequirement, isActiveTask } from "./lifecycle";
 
 export interface TaskFeedDetails {
   receipts: Run[];
@@ -32,7 +33,8 @@ export function getTaskFeedDetails(state: WorkspaceState, taskId: string): TaskF
   const agent = state.agents.find(item => item.id === task.agentId);
   const messages = (agent?.messages ?? []).filter(message => message.taskId === task.id)
     .slice().sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id.localeCompare(b.id));
-  const needsInput = task.needsInput?.trim() || (task.status === "waiting" ? "This task is waiting for a next step." :
+  const needsInput = task.needsInput?.trim() || (hasUnverifiedRequirement(task) ? "Confirm this requirement and its applicability before treating it as work." : hasUnknownProviderState(task) ?
+    task.dueDate && task.dueDate < state.today ? "Deadline passed; completion unverified." : "Confirm the provider's completion state before treating this obligation as outstanding." : ["waiting", "blocked"].includes(task.status) ? "This task is waiting for a next step." :
     latestRun?.status === "unknown" ? "Reconcile the uncertain result before retrying." :
       latestRun?.status === "failed" || latestRun?.status === "conflict" ? latestRun.description || "Review the task's unsuccessful result." : undefined);
   return {
@@ -48,7 +50,7 @@ export function getTaskFeedDetails(state: WorkspaceState, taskId: string): TaskF
 export function rankTaskFeed(state: WorkspaceState, now = new Date()): Task[] {
   assert(Number.isFinite(now.getTime()), "A valid feed time is required.");
   const today = localDate(now, state.settings.timezone);
-  const items = state.tasks.filter(task => task.status !== "done").map(task => {
+  const items = state.tasks.filter(isActiveTask).map(task => {
     const details = getTaskFeedDetails(state, task.id);
     const latest = details.latestRun ? Date.parse(details.latestRun.createdAt) : 0;
     const recent = latest <= now.getTime() && latest >= now.getTime() - 24 * 60 * 60_000;

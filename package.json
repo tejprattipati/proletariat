@@ -23,10 +23,13 @@
     "dotenv": "^18.0.5",
     "express": "^5.1.0",
     "googleapis": "latest",
+    "jose": "^6.2.12",
     "lucide-react": "^0.577.0",
     "luxon": "^3.7.2",
+    "pdf-parse": "^2.4.5",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "yauzl": "^3.4.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -37,6 +40,7 @@
     "@types/node": "^24.10.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "@types/yauzl": "^3.4.0",
     "@vitejs/plugin-react": "latest",
     "concurrently": "latest",
     "tsx": "latest",

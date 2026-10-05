@@ -9,7 +9,7 @@ describe("task rollover", () => {
     const state = workspace();
     state.tasks = [task("one", { dueDate: "2026-10-02", dueTime: "12:30", title: "User title", notes: "User notes", sourceIds: ["source-1"] })];
     const next = rolloverTasks(state, "2026-10-04");
-    expect(next.tasks[0]).toEqual({ ...state.tasks[0], plannedDate: "2026-10-04", carryoverCount: 1 });
+    expect(next.tasks[0]).toMatchObject({ ...state.tasks[0], plannedDate: "2026-10-04", carryoverCount: 1 });
     expect(rolloverTasks(next, "2026-10-04")).toEqual(next);
     expect(rolloverTasks(next, "2026-10-06").tasks[0].carryoverCount).toBe(2);
     expect(state.tasks[0].plannedDate).toBe("2026-10-03");
@@ -51,8 +51,8 @@ describe("source identity and recurrence", () => {
     const state = ingestTaskCandidates(workspace(), [candidate]);
     Object.assign(state.tasks[0], { title: "User override", status: "done", plannedDate: "2026-10-09", estimateMinutes: 90, dueDate: "2026-10-10", pinned: true });
     const next = ingestTaskCandidates(state, [{ ...candidate, sourceVersion: "v2", title: "New extraction title", dueDate: "2026-10-05" }]);
-    expect(next.tasks).toEqual(state.tasks);
-    expect(next.processedKeys).toHaveLength(2);
+    expect(next.tasks[0]).toMatchObject({ id: state.tasks[0].id, title: "User override", status: "done", plannedDate: "2026-10-09", estimateMinutes: 90, dueDate: "2026-10-10", pinned: true, providerDueDate: "2026-10-05" });
+    expect(next.processedKeys.filter(key => key.startsWith("source-revision:"))).toHaveLength(2);
   });
   it("does not resurrect a deleted task for the same processed revision", () => {
     const state = ingestTaskCandidates(workspace(), [candidate]); state.tasks = [];
@@ -61,7 +61,9 @@ describe("source identity and recurrence", () => {
   it("keeps user-deleted extracted tasks deleted when the source changes", () => {
     const state = ingestTaskCandidates(workspace(), [candidate]);
     const deleted = applyAction(state, { type: "task.delete", payload: { id: state.tasks[0].id } }, now).state;
-    expect(ingestTaskCandidates(deleted, [{ ...candidate, sourceVersion: "v2" }]).tasks).toHaveLength(0);
+    const refreshed = ingestTaskCandidates(deleted, [{ ...candidate, sourceVersion: "v2" }]);
+    expect(refreshed.tasks).toHaveLength(1);
+    expect(refreshed.tasks[0].removedAt).toBe(now.toISOString());
   });
   it("creates each recurring occurrence once, preserving completed occurrences", () => {
     const template = task("template", { dueDate: "2026-10-03", status: "done", completedAt: "2026-10-03T07:00:00Z" });

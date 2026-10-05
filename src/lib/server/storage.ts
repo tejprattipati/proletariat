@@ -17,7 +17,7 @@ function db() {
 }
 export function readWorkspace(id: string): WorkspaceState {
   const row = db().prepare("SELECT body FROM workspaces WHERE id = ?").get(id) as { body: string } | undefined;
-  if (row) { const state = JSON.parse(row.body) as WorkspaceState; state.permissions.driveWrite ??= false; state.recipes ??= []; return state; }
+  if (row) { const state = JSON.parse(row.body) as WorkspaceState; state.permissions.driveWrite ??= false; state.permissions.calendarRead ??= false; state.recipes ??= []; state.conversations ??= []; state.attachments ??= []; state.taskHistory ??= []; state.canvasConfig ??= {enabled:false,time:"09:00",weekday:1}; state.dailyConfig ??= {enabled:false,time:"09:00",gmailQuery:"newer_than:1d",calendarId:"primary"}; return state; }
   const state = createDemoState(); saveWorkspace(id, state); return state;
 }
 export function recentDemoWorkspaces(limit = 50): string[] {
@@ -69,5 +69,5 @@ export function reserveOperation(key: string, fingerprint: string): { reserved: 
   return { reserved: Number(inserted.changes) === 1, record: { key, fingerprint, status: row.status, result: row.result ? JSON.parse(row.result) : undefined } };
 }
 export function finishOperation(key: string, result: unknown, status: OperationRecord["status"] = "succeeded") { db().prepare("UPDATE operations SET status=?,result=?,updated_at=? WHERE key=?").run(status, JSON.stringify(result), new Date().toISOString(), key); }
-export function persistResult(workspaceId: string, result: ActionResult) { result.state.version += 1; saveWorkspace(workspaceId, result.state); return result; }
+export function persistResult(workspaceId: string, result: ActionResult) { return transaction(()=>{result.state.version=Math.max(result.state.version,readWorkspace(workspaceId).version)+1;saveWorkspace(workspaceId,result.state);return result;}); }
 export function closeDatabase() { database?.close(); database = undefined; }

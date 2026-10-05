@@ -11,10 +11,10 @@ describe('resumable Google indexing', () => {
   it('persists page position, supports pause/resume, and only checkpoints complete coverage', async () => {
     const h = createSyntheticGoogleAdapter({ pageSize: 1 }); const workspace = state(); h.setPermissions(workspace.permissions);
     const result = await h.integration.execute(workspace, { type: 'scan.start', payload: { provider: 'drive', coverage: 'all' } });
-    const job = workspace.scans[0]; expect(job.read).toBe(1); expect(job.status).toBe('running'); expect(await h.store.get('sync:drive')).toBeUndefined();
+    const job = workspace.scans[0]; expect(job.read).toBe(0); expect(job.skipped).toBe(1); expect(job.status).toBe('running'); expect(await h.store.get('sync:drive')).toBeUndefined();
     await h.integration.execute(workspace, { type: 'scan.pause', payload: { id: result.entityId } }); expect(job.status).toBe('paused');
-    await h.integration.execute(workspace, { type: 'scan.resume', payload: { id: job.id } }); expect(job.read).toBe(2);
-    await h.integration.execute(workspace, { type: 'scan.resume', payload: { id: job.id } }); expect(job.status).toBe('completed'); expect(job.read).toBe(3); expect(job.analyzed).toBe(0);
+    await h.integration.execute(workspace, { type: 'scan.resume', payload: { id: job.id } }); expect(job.read).toBe(1);
+    await h.integration.execute(workspace, { type: 'scan.resume', payload: { id: job.id } }); expect(job.status).toBe('completed'); expect(job.read).toBe(2); expect(job.analyzed).toBe(0);
     expect(await h.store.get('sync:drive')).toBe('synthetic-drive-checkpoint-1');
     const calls = h.calls.length; await h.integration.execute(workspace, { type: 'sync.run', payload: { provider: 'drive' } });
     expect(h.calls.slice(calls).some(call => call.url.includes('/changes?'))).toBe(true); expect(await h.store.get('sync:drive')).toBe('synthetic-drive-checkpoint-2');
@@ -26,7 +26,7 @@ describe('resumable Google indexing', () => {
     await h.integration.execute(workspace, { type: 'scan.resume', payload: { id: result.entityId } });
     // The adapter's page/cursor saved, but the caller still has its previous persisted workspace.
     await h.integration.execute(persisted, { type: 'scan.resume', payload: { id: result.entityId } });
-    expect(persisted.scans[0].status).toBe('completed'); expect(persisted.scans[0].read).toBe(3);
+    expect(persisted.scans[0].status).toBe('completed'); expect(persisted.scans[0].read).toBe(2);
     expect(persisted.resources.map(resource => resource.providerId).sort()).toEqual(['synthetic-doc-1', 'synthetic-folder-1', 'synthetic-sheet-1']);
   });
   it('recovers the initial page after a crash before the scan job was saved', async () => {

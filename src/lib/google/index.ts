@@ -1,5 +1,7 @@
 import type { ActionRequest, ActionResult, Campaign, Connection, Draft, PermissionKey, Resource, Run, WorkspaceState } from '../types';
 import type { GoogleDependencies, GoogleStore, OperationRecord } from './contracts';
+import { GoogleContentReader } from './content';
+import { GoogleDaily } from './daily';
 import { GoogleOAuth } from './oauth';
 import { GoogleProvider, driveResource } from './provider';
 import { runGoogleRecipe } from './recipes';
@@ -9,19 +11,24 @@ import { ScopedGoogleStore } from './storage';
 import { GoogleTransport } from './transport';
 
 export * from './contracts';
+export { GoogleSignIn, signInConfigFromEnv } from './identity';
+export type { VerifiedGoogleIdentity, GoogleIdentityVerifier, GoogleSignInConfig, GoogleSignInDependencies } from './identity';
 export { GoogleIntegrationError, resolveDriveReference } from './security';
 export { EncryptedFileTokenStore } from './storage';
 export { SCOPES, scopesForPermissions, configFromEnv } from './oauth';
 
-const GOOGLE_ACTIONS = new Set(['resource.browse', 'resource.bind', 'sync.run', 'scan.start', 'scan.pause', 'scan.resume', 'draft.create', 'draft.update', 'draft.send', 'campaign.start', 'campaign.resume', 'calendar.upsert', 'calendar.read', 'docs.write', 'recipe.run']);
+const GOOGLE_ACTIONS = new Set(['resource.browse', 'resource.bind', 'sync.run', 'scan.start', 'scan.pause', 'scan.resume', 'draft.create', 'draft.update', 'draft.send', 'campaign.start', 'campaign.resume', 'calendar.upsert', 'calendar.read', 'docs.write', 'recipe.run', 'daily.read', 'attachment.read']);
 export function isGoogleAction(type: string): boolean { return GOOGLE_ACTIONS.has(type); }
 let configured: GoogleIntegration | undefined;
-export function configureGoogleIntegration(dependencies: GoogleDependencies): GoogleIntegration { configured = new GoogleIntegration(dependencies); return configured; }
+let resolver: (()=>GoogleIntegration) | undefined;
+export function configureGoogleIntegrationResolver(resolve:()=>GoogleIntegration) { resolver=resolve; }
+export function configureGoogleIntegration(dependencies: GoogleDependencies): GoogleIntegration { resolver=undefined;configured = new GoogleIntegration(dependencies); return configured; }
 export function getGoogleIntegration(): GoogleIntegration {
+  if(resolver)return resolver();
   if (!configured) throw new GoogleIntegrationError('GOOGLE_NOT_CONFIGURED', 'Google server integration, encrypted token storage, and durable operation storage must be configured.', 503);
   return configured;
 }
-export async function getGoogleStatus(): Promise<Connection> { return configured ? configured.oauth.status() : { provider: 'google', connected: false, configured: false, label: 'Google is not configured' }; }
+export async function getGoogleStatus(): Promise<Connection> { return resolver||configured ? getGoogleIntegration().oauth.status() : { provider: 'google', connected: false, configured: false, label: 'Google is not configured' }; }
 export async function executeGoogleAction(state: WorkspaceState, action: ActionRequest): Promise<ActionResult> { return getGoogleIntegration().execute(state, action); }
 
 /** Single-account server integration. Instantiate separately for each account in a multi-user deployment. */
@@ -30,6 +37,7 @@ export class GoogleIntegration {
   readonly provider: GoogleProvider;
   readonly store: GoogleStore;
   readonly transport: GoogleTransport;
+  readonly contentReader: GoogleContentReader;
   private tail: Promise<unknown> = Promise.resolve();
   private now: () => Date;
   constructor(private deps: GoogleDependencies) {
@@ -39,10 +47,12 @@ export class GoogleIntegration {
     this.transport = new GoogleTransport(this.oauth, deps);
     this.store = new ScopedGoogleStore(deps.store, async () => `grant:${await this.oauth.storageGrantId()}`);
     this.provider = new GoogleProvider(this.transport, this.store, this.now);
+    this.contentReader = new GoogleContentReader(this.provider, this.store, this.now, deps.extractPdfText);
   }
   execute(state: WorkspaceState, action: ActionRequest): Promise<ActionResult> {
     const run = this.tail.then(async () => {
       requireLive(state);
+      if (action.type === 'daily.read' && !(await this.oauth.status()).connected) return this.apply(state, action, false);
       const grant = await this.oauth.grantId();
       return this.oauth.withGrant(grant, () => this.apply(state, action));
     });
@@ -74,7 +84,7 @@ export class GoogleIntegration {
     await this.store.finishOperation(key, record);
     return record;
   }
-  private async apply(state: WorkspaceState, action: ActionRequest): Promise<ActionResult> {
+  private async apply(state: WorkspaceState, action: ActionRequest, connected = true): Promise<ActionResult> {
     requireLive(state);
     if (!isGoogleAction(action.type)) throw new GoogleIntegrationError('UNSUPPORTED_GOOGLE_ACTION', `Unsupported Google action: ${action.type}`);
     const p = action.payload ?? {};
@@ -83,11 +93,40 @@ export class GoogleIntegration {
     const now = this.now().toISOString();
     let entityId: string | undefined;
     let message = '';
-    let status: 'succeeded' | 'unknown' | 'failed' = 'succeeded';
+    let status: Run['status'] = 'succeeded';
     let writes = 0;
     let receipt: Partial<Run> = {};
-    const scans = new GoogleScans(this.provider, this.store, (...keys) => this.assert(state, ...keys), this.now);
+    const scans = new GoogleScans(this.provider, this.store, (...keys) => this.assert(state, ...keys), this.now, this.contentReader);
     switch (action.type) {
+      case 'daily.read': {
+        const daily = await new GoogleDaily(this.provider, this.store, (...keys) => this.assert(state, ...keys), this.now, this.contentReader).read(state, p, connected ? await this.oauth.storageGrantId() : 'disconnected', connected, connected ? await this.oauth.sourceAccountId() : 'disconnected');
+        entityId = daily.id; message = daily.summary;
+        status = daily.providers.some(item => item.status === 'failed') ? 'failed' : daily.providers.some(item => ['partial', 'running'].includes(item.status)) ? 'pending' : daily.providers.some(item => ['not_connected', 'not_enabled'].includes(item.status)) ? 'conflict' : 'succeeded';
+        receipt.sourceIds = daily.sources.map(source => source.id);
+        break;
+      }
+      case 'attachment.read': {
+        await this.assert(state, 'driveRead');
+        const resource = state.resources.find(item => item.id === p.resourceId);
+        if (!resource || !resource.bound || resource.mode !== 'live' || !resource.providerId || resource.kind === 'folder') throw new GoogleIntegrationError('ATTACHMENT_RESOURCE_REQUIRED', 'Select one bound live Google file.');
+        await this.requireBinding('resource', resource.id);
+        const file = await this.provider.getFile(resource.providerId, true);
+        const id = `attachment-${fingerprint({ grant: await this.oauth.storageGrantId(), resourceId: resource.id, tabId: resource.tabId, namedRangeId: resource.namedRangeId })}`;
+        const attachment: NonNullable<WorkspaceState['attachments']>[number] = { id, origin: 'drive', resourceId: resource.id, name: file.name, mimeType: file.mimeType, byteSize: file.size ? Number(file.size) : undefined, url: resource.url, status: 'ready', createdAt: now, mode: 'live' };
+        try {
+          const result = await this.contentReader.read(resource, { maxChars: 40_000, maxBytes: 5 * 1024 * 1024 });
+          attachment.content = result.text; attachment.truncated = result.truncated;
+          message = `Read selected Google file content${result.truncated ? ' (bounded text is truncated)' : ''}. No model interpretation was performed.`;
+        } catch (error) {
+          if (error instanceof GoogleIntegrationError && ['PERMISSION_DENIED', 'GOOGLE_SCOPE_REQUIRED', 'GOOGLE_GRANT_CHANGED', 'GOOGLE_REAUTH_REQUIRED'].includes(error.code)) throw error;
+          attachment.status = error instanceof GoogleIntegrationError && ['GOOGLE_CONTENT_TYPE_UNSUPPORTED', 'GOOGLE_PDF_PARSER_REQUIRED', 'GOOGLE_TEXT_ENCODING_UNSUPPORTED'].includes(error.code) ? 'unsupported' : 'failed';
+          attachment.error = error instanceof GoogleIntegrationError ? error.message : 'Google attachment content could not be extracted.';
+          status = 'failed'; message = attachment.error;
+        }
+        state.attachments ??= []; const existing = state.attachments.findIndex(item => item.id === id);
+        if (existing >= 0) state.attachments[existing] = attachment; else state.attachments.push(attachment);
+        entityId = id; receipt.sourceIds = [resource.id]; break;
+      }
       case 'resource.browse': {
         await this.assert(state, 'driveRead');
         let parentId = typeof p.parentId === 'string' ? p.parentId : undefined;
@@ -128,9 +167,9 @@ export class GoogleIntegration {
         const provider = p.provider as 'gmail' | 'drive';
         const coverage = action.type === 'sync.run' ? (state.permissions[provider === 'drive' ? 'driveFull' : 'gmailFull'] ? 'all' : 'selected') : p.coverage;
         if (coverage !== 'all' && coverage !== 'selected') throw new GoogleIntegrationError('INVALID_COVERAGE', 'Coverage must be selected or all.');
-        const job = await scans.start(state, provider, coverage, action.type === 'sync.run');
+        const job = await scans.start(state, provider, coverage, action.type === 'sync.run', provider === 'gmail' && typeof p.query === 'string' ? text(p.query, 'query', 1000) : undefined);
         entityId = job.id;
-        message = `${provider} ${coverage} coverage: ${job.read} items read; ${job.status}. No model analysis was performed.`;
+        message = `${provider} ${coverage} coverage: ${job.read} ${provider === 'drive' ? 'file contents read' : 'message bodies read'}; ${job.status}. No model analysis was performed.`;
         break;
       }
       case 'scan.pause': {
@@ -141,7 +180,7 @@ export class GoogleIntegration {
       case 'scan.resume': {
         const job = requireScan(state, text(p.id, 'id'));
         await scans.advance(state, job);
-        entityId = job.id; message = `Scan ${job.status}: ${job.read} items read; no model analysis performed.`; break;
+        entityId = job.id; message = `Scan ${job.status}: ${job.read} ${job.provider === 'drive' ? 'file contents read' : 'message bodies read'}; no model analysis performed.`; break;
       }
       case 'draft.create':
       case 'draft.update': {
@@ -214,7 +253,7 @@ export class GoogleIntegration {
         entityId = localId; break;
       }
       case 'calendar.read': {
-        await this.assert(state, 'calendarWrite');
+        await this.assert(state, 'calendarRead');
         const calendarId = typeof p.calendarId === 'string' ? text(p.calendarId, 'calendarId', 512) : 'primary';
         const start = dateTime(p.start, 'start'); const end = dateTime(p.end, 'end');
         const page = await this.provider.listEvents(calendarId, start, end, typeof p.pageToken === 'string' ? p.pageToken : undefined);

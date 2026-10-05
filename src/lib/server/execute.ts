@@ -2,6 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { DateTime } from "luxon";
 import type { ActionRequest, ActionResult, WorkspaceState } from "../types";
 import { applyAction } from "../domain/actions";
+import { attachToConversation, conversationAction, requireConversation } from "./conversations";
+import { configureDaily, runDaily } from "./daily";
+import { interpretDaily } from "./audit-interpret";
+import { configureCanvas, runCanvas } from "./canvas";
 import { dispatchDemoCampaign } from "../domain/campaigns";
 import { createDemoState } from "../domain/fixtures";
 import { validateWorkflow } from "../domain/workflows";
@@ -11,6 +15,37 @@ import { finishOperation, getValue, persistResult, reserveOperation, setValue, w
 type Checkpoint = (result: ActionResult) => void;
 
 export async function executeState(state: WorkspaceState, action: ActionRequest, checkpoint?: Checkpoint): Promise<ActionResult> {
+  if (action.type.startsWith("conversation.")) return conversationAction(state, action);
+  if (action.type === "daily.configure") return configureDaily(state, action);
+  if (["daily.run", "daily.resume"].includes(action.type)) return runDaily(state, action, executeGoogleAction);
+  if (action.type === "daily.interpret") return interpretDaily(state, action, checkpoint);
+  if (action.type === "canvas.configure") return configureCanvas(state, action);
+  if (["canvas.run","canvas.resume"].includes(action.type)) return runCanvas(state, action);
+  if (action.type === "attachment.attachDrive") {
+    let current = structuredClone(state);
+    requireConversation(current, action.payload?.conversationId);
+    if (!current.permissions.driveRead) throw new Error("Enable Drive read before attaching a file.");
+    const id = action.payload?.resourceId;
+    let resource = current.resources.find(item => item.id === id);
+    if (action.payload?.url || !resource?.bound) {
+      const binding = await executeState(current, {type:"resource.bind",payload:{id:typeof id==="string"?id:undefined,url:action.payload?.url,role:"reference"},requestId:`${action.requestId}:bind`});
+      current=binding.state; resource=current.resources.find(item=>item.id===binding.entityId);
+    }
+    if (!resource || resource.kind === "folder" || resource.mode !== current.settings.mode) throw new Error("Choose a file in this workspace, not a folder.");
+    let attachmentId: string;
+    let message: string;
+    if (current.settings.mode === "live") {
+      const result = await executeGoogleAction(current,{type:"attachment.read",payload:{resourceId:resource.id},requestId:action.requestId});
+      current=result.state; attachmentId=String(result.entityId); message=result.message;
+    } else {
+      current.attachments ??= []; attachmentId=`attachment:${resource.id}`;
+      const content=resource.content || `Synthetic reference: ${resource.name}. No Google account has been read.`;
+      if (!current.attachments.some(item=>item.id===attachmentId)) current.attachments.push({id:attachmentId,name:resource.name,origin:"drive",mimeType:"text/plain",resourceId:resource.id,url:resource.url,content:content.slice(0,40000),status:"ready",truncated:content.length>40000,createdAt:new Date().toISOString(),mode:"demo"});
+      message="Attached the synthetic Drive reference. No Google API or model call was used.";
+    }
+    attachToConversation(current,action.payload?.conversationId,[attachmentId]);
+    return {state:current,entityId:attachmentId,message};
+  }
   if (action.type === "settings.update" && action.payload?.mode !== undefined && !["demo", "live"].includes(String(action.payload.mode))) {
     throw new Error("Mode must be demo or live.");
   }
@@ -54,7 +89,8 @@ export async function dispatch(workspaceId: string, action: ActionRequest, owner
       if (destination !== state.settings.mode) {
         if (destination === "live") {
           if (!owner) throw new Error("Owner access is required for live mode.");
-          if (!(await getGoogleStatus()).connected) throw new Error("Connect Google before switching to live mode.");
+          // Live mode is an owned workspace choice, independent of which data
+          // provider is connected. Each external action enforces its own grant.
         }
         setValue(`${workspaceId}:saved:${state.settings.mode}`, state);
         let next = getValue<WorkspaceState>(`${workspaceId}:saved:${destination}`);
@@ -64,7 +100,7 @@ export async function dispatch(workspaceId: string, action: ActionRequest, owner
           next.permissions = { ...state.permissions };
           if (destination === "live") {
             next.tasks = []; next.events = []; next.plan = []; next.resources = []; next.workflows = [];
-            next.drafts = []; next.campaigns = []; next.runs = []; next.scans = []; next.processedKeys = [];
+            next.drafts = []; next.campaigns = []; next.runs = []; next.scans = []; next.processedKeys = []; next.recipes = []; next.conversations = []; next.attachments = []; delete next.daily;
             next.agents = next.agents.map(agent => ({ ...agent, messages: [], resourceIds: [], workflowIds: [], summary: "Ready for your live workflow.", unread: 0, status: "quiet" }));
           }
         }
@@ -99,7 +135,7 @@ export async function dispatch(workspaceId: string, action: ActionRequest, owner
     } catch (error) {
       const message = error instanceof Error ? error.message : "Action failed.";
       // Retain completed steps and failed scan progress even if a later operation fails.
-      progress.runs.unshift({ id: randomUUID(), title: action.type, description: message, status: "failed", createdAt: new Date().toISOString(), mode: progress.settings.mode, modelCalls: 0, tokens: 0, apiCalls: 0, writes: 0, cacheHits: 0, sourceIds: [], workflowId: action.type === "workflow.run" ? String(action.payload?.id) : undefined });
+      progress.runs.unshift({ id: randomUUID(), title: action.type, description: message, status: "failed", createdAt: new Date().toISOString(), mode: progress.settings.mode, modelCalls: 0, tokens: 0, apiCalls: 0, writes: 0, cacheHits: 0, sourceIds: [], requestId, taskId: progress.tasks.some(task => task.id === action.payload?.taskId) ? String(action.payload?.taskId) : undefined, recipeId: action.type === "recipe.run" ? String(action.payload?.id) : undefined, workflowId: action.type === "workflow.run" ? String(action.payload?.id) : undefined });
       persistResult(workspaceId, { state: progress, message });
       finishOperation(key, { error: message }, "unknown");
       throw error;

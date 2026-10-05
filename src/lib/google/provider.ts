@@ -1,5 +1,6 @@
 import type { Resource } from '../types';
 import type { DriveFile, DriveReference, GmailMessage, GoogleDocument, GoogleDocumentTab, GoogleEvent, GoogleStore, Page } from './contracts';
+import { GoogleReadCache } from './cache';
 import { SCOPES } from './oauth';
 import { GoogleIntegrationError, canonicalDriveUrl, identifier, mimeMessage, stableResourceId } from './security';
 import type { RecipeEditPlan } from './template';
@@ -8,19 +9,20 @@ import { GoogleTransport, apiUrl } from './transport';
 const DRIVE = 'https://www.googleapis.com/drive/v3';
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me';
 const CALENDAR = 'https://www.googleapis.com/calendar/v3/calendars';
-const FILE_FIELDS = 'id,name,mimeType,modifiedTime,parents,trashed,shortcutDetails';
+const FILE_FIELDS = 'id,name,mimeType,modifiedTime,parents,trashed,size,shortcutDetails';
 export class GoogleProvider {
   cacheHits = 0;
-  constructor(readonly transport: GoogleTransport, private store: GoogleStore, private now = () => new Date()) {}
+  readonly cache: GoogleReadCache;
+  constructor(readonly transport: GoogleTransport, private store: GoogleStore, private now = () => new Date()) { this.cache = new GoogleReadCache(store, now); }
   async getFile(id: string, fresh = false): Promise<DriveFile> {
     identifier(id);
     await this.transport.authorize([SCOPES.driveRead]);
     const key = `file:${id}`;
-    const cached = await this.store.get<{ expiresAt: number; file: DriveFile }>(key);
+    const cached = await this.cache.get<{ expiresAt: number; file: DriveFile }>(key);
     if (!fresh && cached && cached.expiresAt > this.now().getTime()) { this.cacheHits++; return cached.file; }
     const file = await this.transport.request<DriveFile>(apiUrl(`${DRIVE}/files/${encodeURIComponent(id)}`, { fields: FILE_FIELDS, supportsAllDrives: true }), [SCOPES.driveRead]);
-    if (!file.id || file.trashed) throw new GoogleIntegrationError('RESOURCE_UNAVAILABLE', 'Google resource is missing or trashed.', 404);
-    await this.store.set(key, { expiresAt: this.now().getTime() + 60_000, file });
+    if (file.id !== id || file.trashed) throw new GoogleIntegrationError('RESOURCE_UNAVAILABLE', 'Google resource is missing or trashed.', 404);
+    await this.cache.set(key, { expiresAt: this.now().getTime() + 60_000, file }, 60_000);
     return file;
   }
   async browse(parentId?: string, query?: string, pageToken?: string): Promise<Page<DriveFile>> {
@@ -38,22 +40,28 @@ export class GoogleProvider {
     const result = await this.transport.request<{ changes?: { fileId: string; removed?: boolean; file?: DriveFile }[]; nextPageToken?: string; newStartPageToken?: string }>(apiUrl(`${DRIVE}/changes`, { pageToken, pageSize: 100, fields: `nextPageToken,newStartPageToken,changes(fileId,removed,file(${FILE_FIELDS}))`, supportsAllDrives: true, includeItemsFromAllDrives: true }), [SCOPES.driveRead]);
     return { items: result.changes ?? [], nextPageToken: result.nextPageToken, checkpoint: result.newStartPageToken };
   }
-  async listMessages(pageToken?: string): Promise<Page<{ id: string; threadId: string }>> {
-    const result = await this.transport.request<{ messages?: { id: string; threadId: string }[]; nextPageToken?: string }>(apiUrl(`${GMAIL}/messages`, { maxResults: 50, pageToken }), [SCOPES.gmailRead]);
+  async listMessages(pageToken?: string, query?: string): Promise<Page<{ id: string; threadId: string }>> {
+    const result = await this.transport.request<{ messages?: { id: string; threadId: string }[]; nextPageToken?: string }>(apiUrl(`${GMAIL}/messages`, { maxResults: 50, pageToken, q: query }), [SCOPES.gmailRead]);
     return { items: result.messages ?? [], nextPageToken: result.nextPageToken };
   }
   async getMessage(id: string, fresh = false): Promise<GmailMessage> {
     identifier(id);
     await this.transport.authorize([SCOPES.gmailRead]);
-    const cached = await this.store.get<GmailMessage>(`gmail:${id}`);
+    const cached = await this.cache.get<GmailMessage>(`gmail:${id}`);
     if (cached && !fresh) { this.cacheHits++; return cached; }
     const message = await this.transport.request<GmailMessage>(`${GMAIL}/messages/${encodeURIComponent(id)}?format=full`, [SCOPES.gmailRead]);
-    await this.store.set(`gmail:${id}`, message);
+    if (message.id !== id) throw new GoogleIntegrationError('GOOGLE_CONTENT_ID_MISMATCH', 'Google returned a different Gmail message.');
+    await this.cache.set(`gmail:${id}`, message);
     return message;
+  }
+  async getMessagePart(id: string, attachmentId: string): Promise<string> {
+    const result = await this.transport.request<{ data?: string }>(`${GMAIL}/messages/${encodeURIComponent(identifier(id))}/attachments/${encodeURIComponent(identifier(attachmentId))}`, [SCOPES.gmailRead], { maxResponseBytes: 2 * 1024 * 1024 });
+    if (typeof result.data !== 'string') throw new GoogleIntegrationError('GOOGLE_GMAIL_BODY_UNAVAILABLE', 'Google did not return the selected message body.');
+    return result.data;
   }
   async getThread(id: string): Promise<GmailMessage[]> {
     const result = await this.transport.request<{ messages?: GmailMessage[] }>(`${GMAIL}/threads/${encodeURIComponent(identifier(id))}?format=full`, [SCOPES.gmailRead]);
-    for (const message of result.messages ?? []) await this.store.set(`gmail:${message.id}`, message);
+    for (const message of result.messages ?? []) await this.cache.set(`gmail:${message.id}`, message);
     return result.messages ?? [];
   }
   async gmailCheckpoint(): Promise<string> {
@@ -85,9 +93,9 @@ export class GoogleProvider {
     const result = await this.transport.request<{ id: string }>(`${GMAIL}/messages/send`, [SCOPES.send], { method: 'POST', body: { raw: mimeMessage(input.to, input.subject, input.body, input.messageId) } });
     return requiredExternalId(result.id);
   }
-  async listEvents(calendarId: string, timeMin: string, timeMax: string, pageToken?: string): Promise<Page<GoogleEvent>> {
-    const result = await this.transport.request<{ items?: GoogleEvent[]; nextPageToken?: string }>(apiUrl(`${CALENDAR}/${encodeURIComponent(calendarId)}/events`, { timeMin, timeMax, pageToken, maxResults: 100, singleEvents: true, orderBy: 'startTime' }), [SCOPES.calendarWrite]);
-    return { items: result.items ?? [], nextPageToken: result.nextPageToken };
+  async listEvents(calendarId: string, timeMin?: string, timeMax?: string, pageToken?: string, syncToken?: string, timeZone?: string): Promise<Page<GoogleEvent>> {
+    const result = await this.transport.request<{ items?: GoogleEvent[]; nextPageToken?: string; nextSyncToken?: string }>(apiUrl(`${CALENDAR}/${encodeURIComponent(calendarId)}/events`, { ...(syncToken ? { syncToken } : { timeMin, timeMax }), pageToken, maxResults: 100, singleEvents: true, showDeleted: true, timeZone }), [SCOPES.calendarRead]);
+    return { items: result.items ?? [], nextPageToken: result.nextPageToken, checkpoint: result.nextSyncToken };
   }
   async upsertEvent(calendarId: string, id: string, event: Omit<GoogleEvent, 'id'>, exists: boolean): Promise<string> {
     const base = `${CALENDAR}/${encodeURIComponent(calendarId)}/events`;
