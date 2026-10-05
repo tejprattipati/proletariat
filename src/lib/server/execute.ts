@@ -107,6 +107,7 @@ export async function dispatch(workspaceId: string, action: ActionRequest, owner
         // A mode switch is a dataset switch, not a way to reset the owner's daily model budget.
         next.usage = { ...state.usage };
         next.permissions = { ...state.permissions };
+        next.settings.accentTheme = state.settings.accentTheme;
         return persistResult(workspaceId, { state: next, message: `Switched to ${destination} mode. Each mode keeps separate records.` });
       }
     }

@@ -24,7 +24,7 @@ Open `http://127.0.0.1:5173`. Google identity login does not grant Gmail, Calend
 - **Canvas:** explicitly connected read-only inventory, resumable current-course/source-family pagination, submission facts, weekly new-versus-changed reports, and coverage gaps. Configure approved institution origins before connecting.
 - **Resources and recipes:** browse/search folders; bind exact files, tabs and managed ranges; copy a reference into a chosen folder with deterministic placeholder substitutions.
 - **Email and workflows:** drafts, controlled individual sends and campaigns, selected/full scans, automatic or review workflows, permissions, and durable operation receipts.
-- **Connections and appearance:** per-user Google/ChatGPT accounts, independent read/write/send controls, usage records, and muted themes.
+- **Connections and appearance:** per-user Google/ChatGPT accounts, independent read/write/send controls, usage records, and muted themes saved with each user's settings.
 
 Synthetic mode is available only after sign-in. Its operations use fictional data and never send messages. Live service operations require that user's OAuth grant and enabled capabilities. Actual Google writes and ChatGPT inference have not been tested against a real account in this implementation pass.
 

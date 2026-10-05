@@ -1,5 +1,5 @@
 import { DateTime } from "luxon";
-import type { ActionRequest, ActionResult, Agent, Campaign, PermissionKey, Recipe, Resource, Run, ScanJob, Task, Workflow, WorkflowAction, WorkspaceState } from "../types";
+import type { ActionRequest, ActionResult, Agent, Campaign, PermissionKey, Recipe, Resource, Run, ScanJob, Settings, Task, Workflow, WorkflowAction, WorkspaceState } from "../types";
 import { assert, finiteNumber, localDate, operationKey, stableId, text, unique, validateDate, validateTimezone } from "./core";
 import { createDemoState } from "./fixtures";
 import { generatePlan, validateInterval } from "./planner";
@@ -223,6 +223,14 @@ export function applyAction(input: WorkspaceState, action: ActionRequest, now = 
       if (p.workingHoursStart !== undefined) state.settings.workingHoursStart = text(p.workingHoursStart, "Working hours start");
       if (p.workingHoursEnd !== undefined) state.settings.workingHoursEnd = text(p.workingHoursEnd, "Working hours end");
       if (p.rolloverEnabled !== undefined) state.settings.rolloverEnabled = boolean(p.rolloverEnabled, "Rollover");
+      if (p.accentTheme !== undefined) {
+        const theme=p.accentTheme as {id?:unknown;hue?:unknown;scale?:unknown};
+        assert(theme && typeof theme==='object' && !Array.isArray(theme), 'Choose a valid accent theme.');
+        assert(typeof theme.id==='string' && ['green','blue','plum','rust','slate','custom'].includes(theme.id), 'Choose a supported accent theme.');
+        assert(typeof theme.hue==='number' && Number.isFinite(theme.hue) && theme.hue>=0 && theme.hue<=360, 'Theme hue must be between 0 and 360.');
+        assert(typeof theme.scale==='number' && Number.isFinite(theme.scale) && theme.scale>=0.1 && theme.scale<=1, 'Theme saturation must be between 0.1 and 1.');
+        state.settings.accentTheme={id:theme.id as NonNullable<Settings['accentTheme']>['id'],hue:theme.hue,scale:theme.scale};
+      }
       if (p.mode !== undefined) { assert(p.mode === "demo" || p.mode === "live", "Mode must be demo or live."); state.settings.mode = p.mode; }
       generatePlan({ ...state, tasks: [], events: [], plan: [] });
       message = "Settings updated."; break;
